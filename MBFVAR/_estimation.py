@@ -175,7 +175,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song'):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -204,6 +204,13 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     check_explosive : bool
         if True (default), checks for explosive VAR coefficients and rejects them.
         if False, skips explosive VAR checks (useful for hyperparameter optimization)
+    method : str
+        Estimation approach to use. One of:\n
+        - ``'schorfheide_song'`` (default): the Schorfheide--Song (2015) state-space
+          estimator (unchanged default behaviour).\n
+        - ``'chan_poon_zhu'``: the Chan, Poon & Zhu (2024) conditionally-Gaussian
+          latent-state sampler with common stochastic volatility, adapted to each
+          bi-frequency block.
 
     Returns
     -------
@@ -211,6 +218,16 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         If return_mdd is True, returns the MDD for the last frequency block.
         Otherwise, returns None (standard behavior).
     '''
+
+    valid_methods = ('schorfheide_song', 'chan_poon_zhu')
+    if method not in valid_methods:
+        raise ValueError(f"Invalid method: {method!r}. Choose one of {valid_methods}.")
+    self.method = method
+    if method == 'chan_poon_zhu':
+        from ._estimation_cpz import fit_cpz
+        return fit_cpz(self, mbfvar_data, hyp, var_of_interest=var_of_interest,
+                       temp_agg=temp_agg, max_it_stable=max_it_stable,
+                       return_mdd=return_mdd, check_explosive=check_explosive)
 
     explosive_counter = 0
     valid_draws = []
@@ -1610,10 +1627,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         return mdd_list[-1]
         
 def forecast(self, H, conditionals = None):
-    
+
     '''
     Method to generate the forecasts in the highest frequency.\n
-    
+
     Parameters
     ----------
     H : int
@@ -1623,7 +1640,34 @@ def forecast(self, H, conditionals = None):
         column names must be the variable names\n
         no index needed\n
         either values or np.nan
-    
+
+    Notes
+    -----
+    Dispatches on the estimation method recorded in :meth:`fit` (``self.method``).
+    Both the Schorfheide--Song and Chan--Poon--Zhu estimators populate the same
+    posterior-draw and latent-state attributes, so the forward simulation itself
+    is shared; only the entry point differs.
+
+    Returns
+    -------
+    None
+        Results are stored on the model instance (e.g. ``self.forecast_draws_list``)
+        and consumed by :meth:`aggregate`, the plotting and the saving methods.
+    '''
+    # Dispatch on the estimation method used in fit(). Both estimators populate
+    # the same draw/state attributes, so the forward simulation is shared.
+    method = getattr(self, "method", "schorfheide_song")
+    if method == "chan_poon_zhu":
+        from ._estimation_cpz import forecast_cpz
+        return forecast_cpz(self, H, conditionals=conditionals)
+    return _forecast_impl(self, H, conditionals=conditionals)
+
+
+def _forecast_impl(self, H, conditionals = None):
+
+    '''
+    Shared forward-simulation implementation used by both estimation methods.
+    See :func:`forecast` for the public interface.
     '''
     self.H = H
     # First we need to extend the index

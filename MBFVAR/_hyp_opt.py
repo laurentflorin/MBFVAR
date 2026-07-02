@@ -340,7 +340,7 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
 
 
     
-def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', h_eval = None, n_eval = 1, save = False, name = "hyp.txt"):
+def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', h_eval = None, n_eval = 1, save = False, name = "hyp.txt", method = 'schorfheide_song'):
     """
     Use Bayesian optimization to select hyperparameters minimizing out-of-sample RMSE for MUFBVAR models.
 
@@ -460,7 +460,7 @@ def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, ini
 
                 model_temp = self.__class__(nsim, nburn_perc, nlags, thining)
                 # Note: check_explosive=False skips explosive VAR checks for faster hyperparameter optimization
-                model_temp.fit(data_in, hyp = hyp_list, var_of_interest = var_of_interest, temp_agg = temp_agg, check_explosive = False)
+                model_temp.fit(data_in, hyp = hyp_list, var_of_interest = var_of_interest, temp_agg = temp_agg, check_explosive = False, method = method)
                 model_temp.forecast(H * math.prod(data_in.freq_ratio_list))
                 model_temp.aggregate(frequency = data_in.frequencies[0])
 
@@ -548,7 +548,7 @@ def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, ini
     return hyp
 
 
-def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest=None, temp_agg='mean', h_eval=None, n_eval=1, min_T=None, random_seed=None, save=False, name="hyp.txt"):
+def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest=None, temp_agg='mean', h_eval=None, n_eval=1, min_T=None, random_seed=None, save=False, name="hyp.txt", method='schorfheide_song'):
     """
     Use Bayesian optimization to select hyperparameters minimizing out-of-sample RMSE,
     evaluating on a randomly sampled set of forecast origins.
@@ -754,7 +754,7 @@ def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space,
                 data_in = mbfvar_data(result_in_sample, mufbvar_data_temp.trans, mufbvar_data_temp.frequencies)
 
                 model_temp = self.__class__(nsim, nburn_perc, nlags, thining)
-                model_temp.fit(data_in, hyp=hyp_list, var_of_interest=var_of_interest, temp_agg=temp_agg, check_explosive=False)
+                model_temp.fit(data_in, hyp=hyp_list, var_of_interest=var_of_interest, temp_agg=temp_agg, check_explosive=False, method=method)
                 model_temp.forecast(H * math.prod(data_in.freq_ratio_list))
                 model_temp.aggregate(frequency=data_in.frequencies[0])
 
