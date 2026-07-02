@@ -1641,6 +1641,18 @@ def forecast(self, H, conditionals = None):
         no index needed\n
         either values or np.nan
 
+    Notes
+    -----
+    Dispatches on the estimation method recorded in :meth:`fit` (``self.method``).
+    Both the Schorfheide--Song and Chan--Poon--Zhu estimators populate the same
+    posterior-draw and latent-state attributes, so the forward simulation itself
+    is shared; only the entry point differs.
+
+    Returns
+    -------
+    None
+        Results are stored on the model instance (e.g. ``self.forecast_draws_list``)
+        and consumed by :meth:`aggregate`, the plotting and the saving methods.
     '''
     # Dispatch on the estimation method used in fit(). Both estimators populate
     # the same draw/state attributes, so the forward simulation is shared.

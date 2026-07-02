@@ -35,6 +35,12 @@ from scipy.sparse.linalg import spsolve
 from scipy.linalg import cholesky, solve_triangular
 
 
+# Large precision weight used to enforce the intertemporal-aggregation
+# equality constraints as a hard (near-exact) restriction in the latent-state
+# Gaussian system (mirrors the diffuse-observation trick in the reference code).
+CONSTRAINT_PRECISION = 1e10
+
+
 def vec(A):
     """Stack the columns of a matrix into a single column vector.
 
@@ -436,7 +442,7 @@ def sample_latent_states(Y_obs, beta, invSig, h, n, Nm, Nq, lag, r, nQ,
     Kmu = bigK @ (const_stack - (C @ (M_o @ vecY)))
 
     Tq = M_a.shape[1]
-    iW = sp.diags(1e10 * np.ones(Tq))
+    iW = sp.diags(CONSTRAINT_PRECISION * np.ones(Tq))
     Knew = (K + M_a @ iW @ M_a.T).tocsc()
     rhs = Kmu + M_a @ (iW @ Y_con)
     munew = spsolve(Knew, rhs)

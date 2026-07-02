@@ -113,7 +113,7 @@ def _draw_beta(Y_reg, X_reg, invSig, h, invVbeta_diag, n, p,
 
 
 def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
-            max_it_stable=1000, return_mdd=False, check_explosive=True, **kwargs):
+            max_it_stable=1000, return_mdd=False, check_explosive=True):
     """Estimate the MBFVAR model with the Chan--Poon--Zhu (CPZ) approach.
 
     This is the ``method="chan_poon_zhu"`` estimation path.  See the module
@@ -333,6 +333,8 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                 Y_con[c] = lf_obs[g, q]
 
             hyp_b = self.hyp[bi]
+            # map MBFVAR's overall-tightness lambda to the CPZ prior scale
+            # theta1 = lambda**2 (reference convention in MFVAR.m)
             theta = (float(hyp_b[0]) ** 2, float(hyp_b[1]), theta_defaults[0], theta_defaults[1])
 
             # --- 1. sample latent high-frequency states (CPZ) ---
@@ -471,7 +473,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     return None
 
 
-def forecast_cpz(self, H, conditionals=None, **kwargs):
+def forecast_cpz(self, H, conditionals=None):
     """Forecast for the Chan--Poon--Zhu path.
 
     Because :func:`fit_cpz` populates exactly the same draw/state attributes as
