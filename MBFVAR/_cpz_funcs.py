@@ -99,7 +99,8 @@ def get_resid_var(tmpY, nlags=4):
     return sig2
 
 
-def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0)):
+def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0),
+                        variance_floor=1e-12):
     """Build the Minnesota prior precision diagonal ``invVbeta``.
 
     Port of ``construct_minnesota.m`` adapted to MBFVAR's coefficient layout.
@@ -107,10 +108,13 @@ def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0)):
     In the MATLAB reference the coefficient vector orders the intercept *first*
     for each equation.  MBFVAR instead stores VAR coefficients with the lag
     blocks first and the intercept as the *last* row (see ``Phi`` in
-    :mod:`MBFVAR._estimation`).  This function returns the diagonal of
-    ``invVbeta`` already ordered to match ``vec(Phi)`` where ``Phi`` has shape
+    :mod:`MBFVAR._estimation`).  The Minnesota formulas below define prior
+    *variances*.  The CPZ beta update adds this object to the posterior
+    precision matrix, so this function returns floored and inverted prior
+    variances ordered to match ``vec(Phi)`` where ``Phi`` has shape
     ``(n * lag + 1, n)`` with rows ``[lag1 vars, lag2 vars, ..., lagp vars,
-    const]`` and columns indexing the ``n`` equations (column-major / order='F').
+    const]`` and columns indexing the ``n`` equations (column-major /
+    order='F').
 
     Parameters
     ----------
@@ -123,6 +127,8 @@ def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0)):
     theta : sequence of float, optional
         ``(theta1, theta2, theta3, theta4)`` prior tightness parameters.  The
         defaults ``(0.2**2, 0.5**2, 100, 2)`` match the reference.
+    variance_floor : float, optional
+        Small positive floor applied before inversion.
 
     Returns
     -------
@@ -132,19 +138,20 @@ def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0)):
     AR_s2 = np.asarray(AR_s2, dtype=float).ravel()
     theta1, theta2, theta3, theta4 = theta
     k = n * lag + 1  # number of regressors per equation (incl. constant)
-    diag = np.zeros(n * k)
+    var_diag = np.zeros(n * k)
     for i in range(n):            # equation i
         base = i * k
         for l in range(1, lag + 1):
             for j in range(n):    # regressor variable j
                 pos = base + (l - 1) * n + j
                 if i == j:
-                    diag[pos] = theta1 / (l ** theta4)
+                    var_diag[pos] = theta1 / (l ** theta4)
                 else:
-                    diag[pos] = (AR_s2[i] / AR_s2[j]) * theta1 * theta2 / (l ** theta4)
+                    var_diag[pos] = (AR_s2[i] / AR_s2[j]) * theta1 * theta2 / (l ** theta4)
         # constant term stored last for this equation
-        diag[base + n * lag] = AR_s2[i] * theta3
-    return diag
+        var_diag[base + n * lag] = AR_s2[i] * theta3
+    var_diag = np.maximum(var_diag, variance_floor)
+    return 1.0 / var_diag
 
 
 def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
@@ -243,16 +250,17 @@ def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
     return h, is_accept
 
 
-def build_selection_matrices(n, Nm, T):
+def build_selection_matrices(n, Nm, T, Y_obs=None):
     """Build observed/unobserved selection matrices for one bi-frequency block.
 
     In a bi-frequency block the first ``Nm`` variables are the block's own
-    high-frequency (HF) variables, observed at every HF period, while the
-    remaining ``Nq = n - Nm`` variables are low-frequency (LF) and are latent at
-    the HF sampling rate (they only enter through intertemporal aggregation
-    constraints).  The full stacked latent vector is ordered time-slow /
-    variable-fast: ``[Y_0; Y_1; ...; Y_{T-1}]`` with each ``Y_t`` of length
-    ``n``.
+    high-frequency (HF) variables.  Finite HF entries are treated as observed;
+    missing HF entries, including ragged-edge NaNs, are treated as latent.  The
+    remaining ``Nq = n - Nm`` variables are low-frequency (LF) and are always
+    latent at the HF sampling rate (they only enter through intertemporal
+    aggregation constraints).  The full stacked latent vector is ordered
+    time-slow / variable-fast: ``[Y_0; Y_1; ...; Y_{T-1}]`` with each ``Y_t`` of
+    length ``n``.
 
     Parameters
     ----------
@@ -262,6 +270,9 @@ def build_selection_matrices(n, Nm, T):
         Number of HF (observed) variables.
     T : int
         Number of HF periods.
+    Y_obs : numpy.ndarray or None, optional
+        HF observation matrix, shape ``(T, Nm)``.  If omitted, all HF entries
+        are treated as observed for backward compatibility.
 
     Returns
     -------
@@ -276,10 +287,17 @@ def build_selection_matrices(n, Nm, T):
     unobs_idx : numpy.ndarray
         Indices of the unobserved (latent LF) entries.
     """
-    var_idx = np.arange(n)
-    is_obs = var_idx < Nm  # HF variables observed
+    obs_mask_2d = np.zeros((T, n), dtype=bool)
+    if Y_obs is None:
+        obs_mask_2d[:, :Nm] = True
+    else:
+        Y_obs = np.asarray(Y_obs, dtype=float)
+        if Y_obs.shape[0] != T or Y_obs.shape[1] < Nm:
+            raise ValueError("Y_obs must have shape (T, Nm) or wider.")
+        obs_mask_2d[:, :Nm] = np.isfinite(Y_obs[:, :Nm])
+
     # ind flattened time-slow/var-fast: entry (t, var) -> t*n + var
-    obs_mask = np.tile(is_obs, T)
+    obs_mask = obs_mask_2d.reshape(-1)
     full_idx = np.arange(n * T)
     obs_idx = full_idx[obs_mask]
     unobs_idx = full_idx[~obs_mask]
@@ -366,6 +384,75 @@ def _build_companion_selector(T, lag):
     return selectors
 
 
+def _observed_vector(Y_obs, n, Nm, T, obs_idx):
+    """Stack finite observed HF entries in the order selected by ``obs_idx``."""
+    full_vec = np.zeros(n * T)
+    for var in range(Nm):
+        full_vec[var::n] = Y_obs[:, var]
+    vecY = full_vec[obs_idx]
+    if not np.isfinite(vecY).all():
+        raise ValueError("Observed CPZ entries contain non-finite values.")
+    return vecY
+
+
+def _latent_precision_terms(Y_obs, beta, invSig, h, n, Nm, lag,
+                            M_o, M_u, obs_idx, init_ridge):
+    """Build the latent-state precision and linear term shared by CPZ steps."""
+    T = Y_obs.shape[0]
+    Tnew = T - lag
+
+    vecY = _observed_vector(Y_obs, n, Nm, T, obs_idx)
+
+    A_l = beta[:n * lag, :]
+    const = beta[n * lag, :]
+    selectors = _build_companion_selector(T, lag)
+    I_n = sp.eye(n, format="csc")
+    C = sp.kron(selectors[0], I_n, format="csc")
+    for l in range(1, lag + 1):
+        A_lag = A_l[(l - 1) * n:l * n, :].T
+        C = C - sp.kron(selectors[l], sp.csc_matrix(A_lag), format="csc")
+
+    Cu = (C @ M_u).tocsc()
+    invSig_big = sp.kron(sp.diags(np.exp(-h)), sp.csc_matrix(invSig), format="csc")
+    bigK = Cu.T @ invSig_big
+    K = (bigK @ Cu).tolil()
+
+    ridge_dim = min((n - Nm) * lag, K.shape[0])
+    for d in range(ridge_dim):
+        K[d, d] += init_ridge
+    K = K.tocsc()
+
+    const_stack = np.tile(const, Tnew)
+    Kmu = bigK @ (const_stack - (C @ (M_o @ vecY)))
+    return K, Kmu, vecY
+
+
+def latent_constraint_loglik(Y_obs, beta, invSig, h, n, Nm, Nq, lag, r, nQ,
+                             Y_con, M_o, M_u, M_a, obs_idx,
+                             init_ridge=100.0):
+    """Return the CPZ downstream log-likelihood kernel for aggregation targets.
+
+    This integrates the block's latent unobserved entries out of the same
+    Gaussian precision system used by :func:`sample_latent_states`.  Terms that
+    are constant in ``Y_con`` are omitted, which is sufficient for adjacent-block
+    MH ratios where the downstream block parameters and HF observations are
+    fixed and only the upstream aggregation targets change.
+    """
+    K, Kmu, _ = _latent_precision_terms(
+        Y_obs, beta, invSig, h, n, Nm, lag, M_o, M_u, obs_idx, init_ridge)
+
+    Y_con = np.asarray(Y_con, dtype=float).ravel()
+    if not np.isfinite(Y_con).all():
+        return -np.inf
+
+    Tq = M_a.shape[1]
+    iW = sp.diags(CONSTRAINT_PRECISION * np.ones(Tq))
+    Knew = (K + M_a @ iW @ M_a.T).tocsc()
+    rhs = Kmu + M_a @ (iW @ Y_con)
+    sol = spsolve(Knew, rhs)
+    return float(0.5 * rhs @ sol - 0.5 * CONSTRAINT_PRECISION * (Y_con @ Y_con))
+
+
 def sample_latent_states(Y_obs, beta, invSig, h, n, Nm, Nq, lag, r, nQ,
                          Y_con, M_o, M_u, M_a, obs_idx, temp_agg="mean",
                          init_ridge=100.0):
@@ -380,7 +467,8 @@ def sample_latent_states(Y_obs, beta, invSig, h, n, Nm, Nq, lag, r, nQ,
     Parameters
     ----------
     Y_obs : numpy.ndarray
-        Observed HF data for the block, shape ``(T, Nm)`` (fully observed).
+        HF data for the block, shape ``(T, Nm)``.  Finite entries selected by
+        ``obs_idx`` are conditioned on; missing entries are sampled as latent.
     beta : numpy.ndarray
         VAR coefficients, shape ``(n*lag+1, n)`` (rows ``[lag1..lagp, const]``).
     invSig : numpy.ndarray
@@ -408,38 +496,12 @@ def sample_latent_states(Y_obs, beta, invSig, h, n, Nm, Nq, lag, r, nQ,
         Sampled latent HF states, shape ``(T, n)``.
     """
     T = Y_obs.shape[0]
-    Tnew = T - lag
 
     # --- build stacked observed vector vecY (length No) ---
-    full_vec = np.zeros(n * T)
-    for var in range(Nm):
-        full_vec[var::n] = Y_obs[:, var]
-    vecY = full_vec[obs_idx]
+    vecY = _observed_vector(Y_obs, n, Nm, T, obs_idx)
 
-    # --- transition operator C = kron(A0, I) - sum_l kron(A_l, A_lag_l) ---
-    A_l = beta[:n * lag, :]              # (n*lag, n)
-    const = beta[n * lag, :]            # (n,)
-    selectors = _build_companion_selector(T, lag)
-    I_n = sp.eye(n, format="csc")
-    C = sp.kron(selectors[0], I_n, format="csc")
-    for l in range(1, lag + 1):
-        A_lag = A_l[(l - 1) * n:l * n, :].T   # (n, n) coefficient A_l
-        C = C - sp.kron(selectors[l], sp.csc_matrix(A_lag), format="csc")
-
-    Cu = (C @ M_u).tocsc()
-    # invSig_big = kron(diag(exp(-h)), invSig)
-    invSig_big = sp.kron(sp.diags(np.exp(-h)), sp.csc_matrix(invSig), format="csc")
-    bigK = Cu.T @ invSig_big
-    K = (bigK @ Cu).tolil()
-
-    # diffuse initial-state prior on the earliest latent entries
-    ridge_dim = min(Nq * lag, K.shape[0])
-    for d in range(ridge_dim):
-        K[d, d] += init_ridge
-    K = K.tocsc()
-
-    const_stack = np.tile(const, Tnew)
-    Kmu = bigK @ (const_stack - (C @ (M_o @ vecY)))
+    K, Kmu, _ = _latent_precision_terms(
+        Y_obs, beta, invSig, h, n, Nm, lag, M_o, M_u, obs_idx, init_ridge)
 
     Tq = M_a.shape[1]
     iW = sp.diags(CONSTRAINT_PRECISION * np.ones(Tq))
