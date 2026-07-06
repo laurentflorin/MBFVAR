@@ -8,12 +8,14 @@ touch the default Schorfheide--Song (SS) estimator in :mod:`MBFVAR._estimation`.
 
 Design
 ------
-MBFVAR keeps its existing sequential bi-frequency chaining: blocks ``m = 0 ..
+MBFVAR keeps its existing blockwise bi-frequency structure: blocks ``m = 0 ..
 M-1`` are processed in order, and each block disaggregates the current lower
 frequency into the next higher frequency, feeding its disaggregated series to
-the next block.  For *each* block, instead of the SS balanced/unbalanced Kalman
-filter + smoother, this path uses the CPZ machinery ported in
-:mod:`MBFVAR._cpz_funcs`:
+the next block.  A Metropolis-within-Gibbs adjacent-block correction then
+propagates higher-frequency information back into upstream blocks, matching the
+cross-block feedback structure used by the default SS estimator.  For *each*
+block, instead of the SS balanced/unbalanced Kalman filter + smoother, this path
+uses the CPZ machinery ported in :mod:`MBFVAR._cpz_funcs`:
 
 1. sample the block's latent high-frequency states from the stacked precision
    system with intertemporal-aggregation constraints
@@ -26,6 +28,9 @@ filter + smoother, this path uses the CPZ machinery ported in
 4. sample a common stochastic-volatility (SV) path for the block
    (:func:`~MBFVAR._cpz_funcs.sample_CSV`) together with its persistence and
    innovation-variance hyperparameters.
+5. for adjacent blocks, propose an upstream CPZ block draw and accept/reject it
+   using the downstream block's CPZ latent-precision likelihood under current
+   versus proposed upstream aggregation targets.
 
 The block error covariance used by the latent sampler is
 ``kron(diag(exp(-h)), invSig)``, i.e. common SV enters every block.
@@ -58,6 +63,7 @@ from ._cpz_funcs import (
     sample_CSV,
     build_selection_matrices,
     build_intertemporal_constraint,
+    latent_constraint_loglik,
     sample_latent_states,
 )
 
@@ -110,6 +116,130 @@ def _draw_beta(Y_reg, X_reg, invSig, h, invVbeta_diag, n, p,
         draw = mu + solve_triangular(L.T, z, lower=False)
         beta = draw.reshape(k, n, order="F")
         return beta, False
+
+
+def _constraint_targets(lf_obs, con_index):
+    """Return aggregation targets ordered like ``build_intertemporal_constraint``."""
+    lf_obs = np.asarray(lf_obs, dtype=float)
+    Y_con = np.empty(len(con_index))
+    for c, (g, q) in enumerate(con_index):
+        Y_con[c] = lf_obs[g, q]
+    return Y_con
+
+
+def _build_var_regressors(Y_new, n, p):
+    """Build dependent and lag-regressor arrays from a sampled CPZ state path."""
+    Tstar = Y_new.shape[0]
+    Y_reg = Y_new[p:, :]
+    X_reg = np.ones((Y_reg.shape[0], n * p + 1))
+    for l in range(1, p + 1):
+        X_reg[:, (l - 1) * n:l * n] = Y_new[p - l:Tstar - l, :]
+    return Y_reg, X_reg
+
+
+def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
+                    check_explosive, max_it_stable):
+    """Draw one CPZ bi-frequency block without mutating persistent state."""
+    n, p, r, Nm, Nq = b["nv"], b["p"], b["r"], b["Nm"], b["Nq"]
+    Tstar, nQ = b["Tstar"], b["nQ"]
+    Y_con = _constraint_targets(lf_obs, b["con_index"])
+
+    theta = (
+        float(hyp_b[0]) ** 2,
+        float(hyp_b[1]),
+        theta_defaults[0],
+        theta_defaults[1],
+    )
+
+    Y_new = sample_latent_states(
+        b["YM_block"], b["beta"], b["invSig"], b["h"],
+        n, Nm, Nq, p, r, nQ, Y_con,
+        b["M_o"], b["M_u"], b["M_a"], b["obs_idx"], temp_agg)
+
+    Y_reg, X_reg = _build_var_regressors(Y_new, n, p)
+    invVbeta = b["invVbeta"]
+    if invVbeta is None:
+        AR_s2 = get_resid_var(Y_new)
+        AR_s2 = np.where(AR_s2 <= 0, 1e-8, AR_s2)
+        invVbeta = construct_minnesota(AR_s2, n, p, theta)
+
+    beta, forced = _draw_beta(
+        Y_reg, X_reg, b["invSig"], b["h"], invVbeta,
+        n, p, check_explosive, max_it_stable)
+
+    err = Y_reg - X_reg @ beta
+    D = np.exp(-b["h"])
+    S = 100.0 * np.eye(n) + err.T @ (err * D[:, None])
+    scale = np.linalg.inv(S)
+    scale = 0.5 * (scale + scale.T)
+    invSig = wishart.rvs(df=Y_reg.shape[0] + n + 3, scale=scale)
+    invSig = np.atleast_2d(invSig)
+
+    R = cholesky(invSig, lower=False)
+    s2 = np.sum((err @ R) ** 2, axis=1)
+    h_new, _ = sample_CSV(s2, b["rho"], b["sigh2"], b["h"], n, True)
+    eh = h_new[1:] - b["rho"] * h_new[:-1]
+    sigh2 = 1.0 / np.random.gamma(
+        10 + Y_reg.shape[0] / 2.0,
+        1.0 / (0.004 + np.sum(eh ** 2) / 2.0),
+    )
+    hlag = h_new[:-1]
+    K_rho = hlag @ hlag / sigh2 + 100.0
+    rho = (hlag @ h_new[1:] / sigh2) / K_rho + np.random.randn() / math.sqrt(K_rho)
+
+    Sigma = np.linalg.inv(invSig) * math.exp(h_new[-1])
+    Sigma = 0.5 * (Sigma + Sigma.T)
+
+    return dict(
+        Y_new=Y_new,
+        beta=beta,
+        invSig=invSig,
+        h=h_new,
+        rho=rho,
+        sigh2=sigh2,
+        Sigma=Sigma,
+        invVbeta=invVbeta,
+        forced=forced,
+    )
+
+
+def _apply_cpz_block_draw(b, draw):
+    """Persist a CPZ block draw into the mutable block state."""
+    b["Y_new"] = draw["Y_new"]
+    b["beta"] = draw["beta"]
+    b["invSig"] = draw["invSig"]
+    b["h"] = draw["h"]
+    b["rho"] = draw["rho"]
+    b["sigh2"] = draw["sigh2"]
+    b["Sigma"] = draw["Sigma"]
+    b["invVbeta"] = draw["invVbeta"]
+
+
+def _cpz_block_output(Y_new, b, var_of_interest, idx_voi_m, idx_voi_q):
+    """Build the disaggregated output that feeds the next MBF block."""
+    out = Y_new[2 * b["p"]:, :]
+    if var_of_interest is not None:
+        idx_vars = np.concatenate((
+            np.array(idx_voi_m[b["m"]], dtype=int),
+            b["Nm"] + np.array(idx_voi_q, dtype=int)))
+        out = out[:, idx_vars]
+    return out
+
+
+def _cpz_downstream_loglik(b, lf_obs, temp_agg):
+    """Adjacent-block likelihood kernel used by the CPZ MH correction."""
+    Y_con = _constraint_targets(lf_obs, b["con_index"])
+    return latent_constraint_loglik(
+        b["YM_block"], b["beta"], b["invSig"], b["h"],
+        b["nv"], b["Nm"], b["Nq"], b["p"], b["r"], b["nQ"], Y_con,
+        b["M_o"], b["M_u"], b["M_a"], b["obs_idx"])
+
+
+def _store_cpz_block_draw(bi, j_temp, b, Phip_list, Sigmap_list, h_list):
+    """Store a thinned CPZ parameter draw for one block."""
+    Phip_list[bi][j_temp, :, :] = b["beta"]
+    Sigmap_list[bi][j_temp, :, :] = b["Sigma"]
+    h_list[bi][j_temp, :] = b["h"]
 
 
 def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
@@ -252,7 +382,8 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
         out_len = Tnobs - p
 
         # pre-build the (draw-invariant) selection and constraint matrices
-        M_o, M_u, obs_idx, unobs_idx = build_selection_matrices(nv, Nm, Tstar)
+        M_o, M_u, obs_idx, unobs_idx = build_selection_matrices(
+            nv, Nm, Tstar, Y_obs=YM_block)
         nQ_fit = min(nQ, Tstar // r)   # keep windows inside the sample
         M_a, con_index = build_intertemporal_constraint(
             nv, Nm, Nq, Tstar, r, nQ_fit, unobs_idx, temp_agg)
@@ -305,6 +436,8 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     YYactsim_list = [np.full((n_store, r_L + 1, nv_L), np.nan)]
     XXactsim_list = [np.full((n_store, r_L + 1, nv_L * p_L + 1), np.nan)]
     valid_draws = []
+    mh_accept_counts = [0] * max(M - 1, 0)
+    mh_total_counts = [0] * max(M - 1, 0)
 
     print(" ", end="\n")
     print("Multi Frequency BVAR: Estimation (Chan-Poon-Zhu)", end="\n")
@@ -327,94 +460,78 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                 lf_obs = np.asarray(YQ0_list[0], dtype=float)
             else:
                 lf_obs = prev_Ynew
-            # build the constraint target vector Y_con in con_index order
-            Y_con = np.empty(len(b["con_index"]))
-            for c, (g, q) in enumerate(b["con_index"]):
-                Y_con[c] = lf_obs[g, q]
 
-            hyp_b = self.hyp[bi]
-            # map MBFVAR's overall-tightness lambda to the CPZ prior scale
-            # theta1 = lambda**2 (reference convention in MFVAR.m)
-            theta = (float(hyp_b[0]) ** 2, float(hyp_b[1]), theta_defaults[0], theta_defaults[1])
-
-            # --- 1. sample latent high-frequency states (CPZ) ---
-            Y_new = sample_latent_states(
-                b["YM_block"], b["beta"], b["invSig"], b["h"],
-                nv, Nm, Nq, p, r, nQ, Y_con,
-                b["M_o"], b["M_u"], b["M_a"], b["obs_idx"], temp_agg)
-
-            # --- build regression matrices from the latent series ---
-            Y_reg = Y_new[p:, :]                     # (Tnew_reg, n)
-            Tnew_reg = Y_reg.shape[0]
-            X_reg = np.ones((Tnew_reg, n * p + 1))
-            for l in range(1, p + 1):
-                X_reg[:, (l - 1) * n:l * n] = Y_new[p - l:Tstar - l, :]
-
-            if b["invVbeta"] is None:
-                AR_s2 = get_resid_var(Y_new)
-                AR_s2 = np.where(AR_s2 <= 0, 1e-8, AR_s2)
-                b["invVbeta"] = construct_minnesota(AR_s2, nv, p, theta)
-
-            # --- 2. draw VAR coefficients (Minnesota, with stability check) ---
-            beta, forced = _draw_beta(
-                Y_reg, X_reg, b["invSig"], b["h"], b["invVbeta"],
-                nv, p, check_explosive, max_it_stable)
-            b["beta"] = beta
-
-            # --- 3. draw error precision (Wishart) ---
-            err = Y_reg - X_reg @ beta
-            D = np.exp(-b["h"])
-            S = 100.0 * np.eye(nv) + err.T @ (err * D[:, None])
-            scale = np.linalg.inv(S)
-            scale = 0.5 * (scale + scale.T)
-            invSig = wishart.rvs(df=Tnew_reg + nv + 3, scale=scale)
-            invSig = np.atleast_2d(invSig)
-            b["invSig"] = invSig
-
-            # --- 4. common stochastic volatility ---
-            R = cholesky(invSig, lower=False)        # upper: R'R = invSig
-            s2 = np.sum((err @ R) ** 2, axis=1)
-            h_new, _ = sample_CSV(s2, b["rho"], b["sigh2"], b["h"], nv, True)
-            b["h"] = h_new
-            eh = h_new[1:] - b["rho"] * h_new[:-1]
-            b["sigh2"] = 1.0 / np.random.gamma(10 + Tnew_reg / 2.0,
-                                               1.0 / (0.004 + np.sum(eh ** 2) / 2.0))
-            hlag = h_new[:-1]
-            K_rho = hlag @ hlag / b["sigh2"] + 100.0
-            b["rho"] = (hlag @ h_new[1:] / b["sigh2"]) / K_rho + np.random.randn() / math.sqrt(K_rho)
-
-            # base error covariance scaled by the latest volatility level
-            Sigma = np.linalg.inv(invSig) * math.exp(h_new[-1])
-            Sigma = 0.5 * (Sigma + Sigma.T)
+            draw = _draw_cpz_block(
+                b, lf_obs, self.hyp[bi], theta_defaults, temp_agg,
+                check_explosive, max_it_stable)
+            _apply_cpz_block_draw(b, draw)
 
             if store:
-                Phip_list[bi][j_temp, :, :] = beta
-                Sigmap_list[bi][j_temp, :, :] = Sigma
-                h_list[bi][j_temp, :] = h_new
+                _store_cpz_block_draw(bi, j_temp, b, Phip_list, Sigmap_list, h_list)
                 if bi == M - 1:
                     valid_draws.append(j_temp)
                     # latent LF states over the estimation sample
-                    lstate_list[0][j_temp, :, :] = Y_new[p:, Nm:].T
+                    lstate_list[0][j_temp, :, :] = b["Y_new"][p:, Nm:].T
                     # tail of the actual/regressor data for forward simulation
                     tail = r + 1
-                    Y_tail = Y_new[Tstar - tail:Tstar, :]
+                    Y_tail = b["Y_new"][Tstar - tail:Tstar, :]
                     YYactsim_list[0][j_temp, :, :] = Y_tail
                     for kk in range(tail):
                         t = Tstar - tail + kk
                         row = np.ones(n * p + 1)
                         for l in range(1, p + 1):
-                            row[(l - 1) * n:l * n] = Y_new[t - l, :]
+                            row[(l - 1) * n:l * n] = b["Y_new"][t - l, :]
                         XXactsim_list[0][j_temp, kk, :] = row
 
             # --- feed the disaggregated series to the next block ---
             if bi < M - 1:
-                out = Y_new[2 * p:, :]                # length out_len
-                if var_of_interest is not None:
-                    idx_vars = np.concatenate((
-                        np.array(idx_voi_m[bi], dtype=int),
-                        Nm + np.array(idx_voi_q, dtype=int)))
-                    out = out[:, idx_vars]
-                prev_Ynew = out
+                b["out"] = _cpz_block_output(
+                    b["Y_new"], b, var_of_interest, idx_voi_m, idx_voi_q)
+                prev_Ynew = b["out"]
+
+        # ----------------------------------------------------------------
+        # Metropolis-within-Gibbs adjacent-block correction.
+        #
+        # This mirrors the default estimator's correction at the block level:
+        # propose a fresh upstream CPZ block draw from its own conditional, then
+        # accept/reject using the downstream block's likelihood under the
+        # current vs proposed upstream aggregation targets.  The downstream CPZ
+        # likelihood is evaluated by integrating the latent entries out of the
+        # same precision system used by sample_latent_states().
+        # ----------------------------------------------------------------
+        for _m in range(M - 1):
+            mh_total_counts[_m] += 1
+            try:
+                current_out = blocks[_m]["out"]
+                ll_cur = _cpz_downstream_loglik(blocks[_m + 1], current_out, temp_agg)
+
+                if _m == 0:
+                    upstream_lf_obs = np.asarray(YQ0_list[0], dtype=float)
+                else:
+                    upstream_lf_obs = blocks[_m - 1]["out"]
+
+                proposal = _draw_cpz_block(
+                    blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
+                    temp_agg, check_explosive, max_it_stable)
+                proposed_out = _cpz_block_output(
+                    proposal["Y_new"], blocks[_m], var_of_interest,
+                    idx_voi_m, idx_voi_q)
+                ll_prop = _cpz_downstream_loglik(blocks[_m + 1], proposed_out, temp_agg)
+
+                log_alpha = ll_prop - ll_cur
+                if np.isnan(log_alpha) or not np.isfinite(ll_prop):
+                    log_alpha = -np.inf
+
+                if np.log(np.random.uniform()) < log_alpha:
+                    mh_accept_counts[_m] += 1
+                    _apply_cpz_block_draw(blocks[_m], proposal)
+                    blocks[_m]["out"] = proposed_out
+                    if store:
+                        _store_cpz_block_draw(
+                            _m, j_temp, blocks[_m],
+                            Phip_list, Sigmap_list, h_list)
+            except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                continue
 
     # ------------------------------------------------------------------
     # store results under the SAME attribute names the SS path uses so that
@@ -459,6 +576,12 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     self.index_list = index_list
     self.var_of_interest = var_of_interest
     self.valid_draws = [d for d in valid_draws if d >= self.nburn / self.thining]
+    self.mh_accept_counts = mh_accept_counts
+    self.mh_total_counts = mh_total_counts
+    self.mh_accept_rates = [
+        (c / t if t > 0 else float("nan"))
+        for c, t in zip(mh_accept_counts, mh_total_counts)
+    ]
 
     # convenience scalars for the last block (mirrors the SS estimator)
     self.Nm = Nm_list[-1]
