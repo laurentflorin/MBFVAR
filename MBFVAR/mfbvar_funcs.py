@@ -347,14 +347,19 @@ def mdd_(hyp, YY, spec):
         gam0 = gam0 + loggamma(0.5*(n_dummy-k+1-(i+1)))
         gam1 = gam1 + loggamma(0.5*(n_total-k+1-(i+1)))
 
+    _, logdet_xxdum = np.linalg.slogdet(XXdum.T @ XXdum)
+    _, logdet_s0 = np.linalg.slogdet(S0)
+    _, logdet_xxfull = np.linalg.slogdet(XX_full.T @ XX_full)
+    _, logdet_s1 = np.linalg.slogdet(S1)
+
     #dummy observation
 
-    lnpY0 = (-nv * (n_dummy-k) * 0.5 * np.log(math.pi) - (nv/2) * np.log(np.absolute(np.linalg.det(XXdum.T @ XXdum))) -
-            (n_dummy-k)*0.5*np.log(np.absolute(np.linalg.det(S0)))+nv*(nv-1)*0.25*np.log(math.pi)+gam0)
+    lnpY0 = (-nv * (n_dummy-k) * 0.5 * np.log(math.pi) - (nv/2) * logdet_xxdum -
+            (n_dummy-k)*0.5*logdet_s0+nv*(nv-1)*0.25*np.log(math.pi)+gam0)
 
     #dummy and actual observation
-    lnpY1 = (-nv * (n_total-k) * 0.5 * np.log(math.pi) - (nv/2) * np.log(np.absolute(np.linalg.det(XX_full.T @ XX_full))) -
-            (n_total-k)*0.5*np.log(np.absolute(np.linalg.det(S1)))+nv*(nv-1)*0.25*np.log(math.pi)+gam1)
+    lnpY1 = (-nv * (n_total-k) * 0.5 * np.log(math.pi) - (nv/2) * logdet_xxfull -
+            (n_total-k)*0.5*logdet_s1+nv*(nv-1)*0.25*np.log(math.pi)+gam1)
 
     lnpYY = lnpY1 - lnpY0
 

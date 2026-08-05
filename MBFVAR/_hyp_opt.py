@@ -91,36 +91,31 @@ def update_hyperparameters(self, mbfvar_data, pbounds, init_points, n_iter, nsim
         This ensures hyperparameter optimization uses the SAME model as main estimation,
         including the Metropolis-within-Gibbs backward correction.
         """
+        penalty = -1e16
         # Temporarily store current nsim/nburn and set to optimization values
         original_nsim = self.nsim
         original_nburn = self.nburn_perc
 
         self.nsim = nsim
-        self.nburn_perc = self.nburn_perc  # Keep the same burn-in proportion
 
         
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False)
+            if mdd is None or not np.isfinite(mdd):
+                return penalty
+            return float(mdd)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does
             # not propagate the exception and kill the optimisation.
-            return -1e16
+            return penalty
         
         finally:
             # Always restore the original values
             self.nsim = original_nsim
             self.nburn_perc = original_nburn
-
-        if not np.isfinite(mdd):
-            return -1e16
-        # Restore original values
-        self.nsim = original_nsim
-        self.nburn_perc = original_nburn
-
-        return mdd
 
     def calc_mdd_1(lambda1_1, lambda2_1, lambda4_1, lambda5_1):
 
@@ -250,36 +245,30 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
         This ensures hyperparameter optimization uses the SAME model as main estimation,
         including the Metropolis-within-Gibbs backward correction.
         """
+        penalty = -1e16
         # Temporarily store current nsim/nburn and set to optimization values
         original_nsim = self.nsim
         original_nburn = self.nburn_perc
 
         self.nsim = nsim
-        self.nburn_perc = self.nburn_perc  # Keep the same burn-in proportion
 
         # Call the main fit() function with return_mdd=True
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False)
+            if mdd is None or not np.isfinite(mdd):
+                return penalty
+            return float(mdd)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does
             # not propagate the exception and kill the optimisation.
-            return -1e16
+            return penalty
         finally:
             # Always restore the original values
             self.nsim = original_nsim
             self.nburn_perc = original_nburn
-
-        if not np.isfinite(mdd):
-            return -1e16
-        
-        # Restore original values
-        self.nsim = original_nsim
-        self.nburn_perc = original_nburn
-
-        return mdd
 
     @scheduler.parallel(n_jobs = njobs)
     def calc_mdd_1(lambda1_1, lambda2_1, lambda4_1, lambda5_1):
