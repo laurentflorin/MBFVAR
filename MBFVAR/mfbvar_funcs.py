@@ -334,10 +334,12 @@ def mdd_(hyp, YY, spec):
 
     #Phi0 = np.linalg.solve((XXdum.T @ XXdum), (XXdum.T @ YYdum))
     #S0 = (YYdum.T @ YYdum) - np.linalg.solve((XXdum.T @ XXdum).T, (YYdum.T @ XXdum).T).T @ XXdum.T @ YYdum
-    S0 =  (YYdum.T @ YYdum) - ((YYdum.T @ XXdum) @ calculate_pseudo_inverse((XXdum.T @ XXdum))) @ XXdum.T @ YYdum
+    XXdum_cross = XXdum.T @ XXdum
+    S0 =  (YYdum.T @ YYdum) - ((YYdum.T @ XXdum) @ calculate_pseudo_inverse(XXdum_cross)) @ XXdum.T @ YYdum
     #Phi1 = np.linalg.solve((XX.T @ XX), (XX.T @ YY))
     #S1 = (YY.T @ YY) - np.linalg.solve((XX.T @ XX).T, (YY.T @ XX).T).T @ XX.T @ YY
-    S1 = (YY_full.T @ YY_full) - ((YY_full.T @ XX_full) @ calculate_pseudo_inverse((XX_full.T @ XX_full)))  @ XX_full.T @ YY_full
+    XX_full_cross = XX_full.T @ XX_full
+    S1 = (YY_full.T @ YY_full) - ((YY_full.T @ XX_full) @ calculate_pseudo_inverse(XX_full_cross))  @ XX_full.T @ YY_full
 
     # compute constants for integrals
     gam0 = 0
@@ -349,12 +351,12 @@ def mdd_(hyp, YY, spec):
 
     #dummy observation
 
-    lnpY0 = (-nv * (n_dummy-k) * 0.5 * np.log(math.pi) - (nv/2) * np.log(np.absolute(np.linalg.det(XXdum.T @ XXdum))) -
-            (n_dummy-k)*0.5*np.log(np.absolute(np.linalg.det(S0)))+nv*(nv-1)*0.25*np.log(math.pi)+gam0)
+        lnpY0 = (-nv * (n_dummy-k) * 0.5 * np.log(math.pi) - (nv/2) * np.linalg.slogdet(XXdum_cross)[1] -
+            (n_dummy-k)*0.5*np.linalg.slogdet(S0)[1]+nv*(nv-1)*0.25*np.log(math.pi)+gam0)
 
     #dummy and actual observation
-    lnpY1 = (-nv * (n_total-k) * 0.5 * np.log(math.pi) - (nv/2) * np.log(np.absolute(np.linalg.det(XX_full.T @ XX_full))) -
-            (n_total-k)*0.5*np.log(np.absolute(np.linalg.det(S1)))+nv*(nv-1)*0.25*np.log(math.pi)+gam1)
+        lnpY1 = (-nv * (n_total-k) * 0.5 * np.log(math.pi) - (nv/2) * np.linalg.slogdet(XX_full_cross)[1] -
+            (n_total-k)*0.5*np.linalg.slogdet(S1)[1]+nv*(nv-1)*0.25*np.log(math.pi)+gam1)
 
     lnpYY = lnpY1 - lnpY0
 

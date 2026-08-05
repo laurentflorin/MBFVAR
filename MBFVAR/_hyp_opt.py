@@ -35,6 +35,14 @@ from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
 
 
+def _finite_mdd_or_penalty(mdd, penalty=-1e16):
+    try:
+        mdd = float(mdd)
+    except (TypeError, ValueError):
+        return penalty
+    return mdd if np.isfinite(mdd) else penalty
+
+
 
 def update_hyperparameters(self, mbfvar_data, pbounds, init_points, n_iter, nsim, var_of_interest = None, temp_agg = 'mean', save = False, name = "hyp.txt"):
     
@@ -99,28 +107,23 @@ def update_hyperparameters(self, mbfvar_data, pbounds, init_points, n_iter, nsim
         self.nburn_perc = self.nburn_perc  # Keep the same burn-in proportion
 
         
+        mdd = None
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does
             # not propagate the exception and kill the optimisation.
-            return -1e16
+            mdd = None
         
         finally:
             # Always restore the original values
             self.nsim = original_nsim
             self.nburn_perc = original_nburn
 
-        if not np.isfinite(mdd):
-            return -1e16
-        # Restore original values
-        self.nsim = original_nsim
-        self.nburn_perc = original_nburn
-
-        return mdd
+        return _finite_mdd_or_penalty(mdd)
 
     def calc_mdd_1(lambda1_1, lambda2_1, lambda4_1, lambda5_1):
 
@@ -257,29 +260,23 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
         self.nsim = nsim
         self.nburn_perc = self.nburn_perc  # Keep the same burn-in proportion
 
+        mdd = None
         # Call the main fit() function with return_mdd=True
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does
             # not propagate the exception and kill the optimisation.
-            return -1e16
+            mdd = None
         finally:
             # Always restore the original values
             self.nsim = original_nsim
             self.nburn_perc = original_nburn
 
-        if not np.isfinite(mdd):
-            return -1e16
-        
-        # Restore original values
-        self.nsim = original_nsim
-        self.nburn_perc = original_nburn
-
-        return mdd
+        return _finite_mdd_or_penalty(mdd)
 
     @scheduler.parallel(n_jobs = njobs)
     def calc_mdd_1(lambda1_1, lambda2_1, lambda4_1, lambda5_1):
