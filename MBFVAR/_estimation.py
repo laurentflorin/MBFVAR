@@ -175,7 +175,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song'):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -223,6 +223,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     if method not in valid_methods:
         raise ValueError(f"Invalid method: {method!r}. Choose one of {valid_methods}.")
     self.method = method
+    if seed is None:
+        seed = getattr(self, 'seed', 0)
+    self.seed = seed
+    np.random.seed(seed)
     if method == 'chan_poon_zhu':
         from ._estimation_cpz import fit_cpz
         return fit_cpz(self, mbfvar_data, hyp, var_of_interest=var_of_interest,
@@ -1626,7 +1630,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     if return_mdd:
         return mdd_list[-1]
         
-def forecast(self, H, conditionals = None):
+def forecast(self, H, conditionals = None, seed = None):
 
     '''
     Method to generate the forecasts in the highest frequency.\n
@@ -1656,6 +1660,9 @@ def forecast(self, H, conditionals = None):
     '''
     # Dispatch on the estimation method used in fit(). Both estimators populate
     # the same draw/state attributes, so the forward simulation is shared.
+    if seed is None:
+        seed = getattr(self, 'seed', 0)
+    np.random.seed(seed)
     method = getattr(self, "method", "schorfheide_song")
     if method == "chan_poon_zhu":
         from ._estimation_cpz import forecast_cpz
@@ -1792,9 +1799,9 @@ def _forecast_impl(self, H, conditionals = None):
         
         for h in range(H_+1):
             if post_sig.size > 1:
-                error_pred[h,:] = np.random.default_rng().multivariate_normal(mean = np.zeros(self.nv_list[-1]), cov = post_sig, method = "cholesky")
+                error_pred[h,:] = np.linalg.cholesky(post_sig) @ np.random.standard_normal(self.nv_list[-1])
             else:
-                error_pred[h,:] = np.random.default_rng().normal(loc = 0, scale = post_sig)
+                error_pred[h,:] = np.random.normal(loc = 0, scale = post_sig)
         # given posterior draw, iterate forward to construct forecasts
         
         for h in range(1,H_+1):

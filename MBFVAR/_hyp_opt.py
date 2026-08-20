@@ -195,7 +195,7 @@ def update_hyperparameters(self, mbfvar_data, pbounds, init_points, n_iter, nsim
     return hyp
 
 
-def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', save = False, name = "hyp.txt"):
+def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', save = False, name = "hyp.txt", seed = 0):
     
     '''
     This method uses bayesian optimization to find the hyperparameters with the highest mdd\n
@@ -246,6 +246,11 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
     '''
     from mango import scheduler, Tuner
 
+    # Seeds both mango's own candidate-point sampling (which draws from the
+    # global numpy/scipy random state) and, transitively, every fit() call
+    # below (each reseeds from self.seed, which is fixed here).
+    np.random.seed(seed)
+    self.seed = seed
 
     def estim(mbfvar_data, hyp_list, nsim, var_of_interest, temp_agg):
         """
@@ -265,7 +270,7 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True, check_explosive=False)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False, seed=seed)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does
@@ -337,7 +342,7 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
 
 
     
-def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', h_eval = None, n_eval = 1, save = False, name = "hyp.txt", method = 'schorfheide_song'):
+def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', h_eval = None, n_eval = 1, save = False, name = "hyp.txt", method = 'schorfheide_song', seed = 0):
     """
     Use Bayesian optimization to select hyperparameters minimizing out-of-sample RMSE for MUFBVAR models.
 
@@ -406,6 +411,11 @@ def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, ini
     if not isinstance(n_eval, int) or n_eval < 1:
         raise ValueError(f"n_eval must be a positive integer, got {n_eval}.")
 
+    # Seeds mango's own candidate-point sampling (drawn from the global
+    # numpy/scipy random state); each model_temp below is constructed with
+    # the same fixed seed so every RMSE evaluation is reproducible too.
+    np.random.seed(seed)
+
     nburn_perc =  self.nburn_perc
     nlags = self.nlags
     thining = self.thining
@@ -455,7 +465,7 @@ def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, ini
 
                 data_in = mbfvar_data(result_in_sample, mufbvar_data_temp.trans, mufbvar_data_temp.frequencies)
 
-                model_temp = self.__class__(nsim, nburn_perc, nlags, thining)
+                model_temp = self.__class__(nsim, nburn_perc, nlags, thining, seed=seed)
                 # Note: check_explosive=False skips explosive VAR checks for faster hyperparameter optimization
                 model_temp.fit(data_in, hyp = hyp_list, var_of_interest = var_of_interest, temp_agg = temp_agg, check_explosive = False, method = method)
                 model_temp.forecast(H * math.prod(data_in.freq_ratio_list))
@@ -545,7 +555,7 @@ def update_hyperparameters_mango_rmse(self, mufbvar_data_in, param_space, H, ini
     return hyp
 
 
-def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest=None, temp_agg='mean', h_eval=None, n_eval=1, min_T=None, random_seed=None, save=False, name="hyp.txt", method='schorfheide_song'):
+def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space, H, init_points, n_iter, nsim, njobs, var_of_interest=None, temp_agg='mean', h_eval=None, n_eval=1, min_T=None, random_seed=0, save=False, name="hyp.txt", method='schorfheide_song'):
     """
     Use Bayesian optimization to select hyperparameters minimizing out-of-sample RMSE,
     evaluating on a randomly sampled set of forecast origins.
@@ -704,6 +714,9 @@ def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space,
 
     rng = np.random.default_rng(random_seed)
     sampled_ks = sorted(rng.choice(n_valid, size=n_eval, replace=False).tolist())
+    # Also seeds mango's own candidate-point sampling (global numpy/scipy
+    # random state) and every model_temp estimation below with the same seed.
+    np.random.seed(random_seed)
 
     # ------------------------------------------------------------------
     # Inner RMSE function — identical to update_hyperparameters_mango_rmse
@@ -750,7 +763,7 @@ def update_hyperparameters_mango_rmse_random(self, mufbvar_data_in, param_space,
 
                 data_in = mbfvar_data(result_in_sample, mufbvar_data_temp.trans, mufbvar_data_temp.frequencies)
 
-                model_temp = self.__class__(nsim, nburn_perc, nlags, thining)
+                model_temp = self.__class__(nsim, nburn_perc, nlags, thining, seed=random_seed)
                 model_temp.fit(data_in, hyp=hyp_list, var_of_interest=var_of_interest, temp_agg=temp_agg, check_explosive=False, method=method)
                 model_temp.forecast(H * math.prod(data_in.freq_ratio_list))
                 model_temp.aggregate(frequency=data_in.frequencies[0])
