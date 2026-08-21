@@ -234,6 +234,14 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                        return_mdd=return_mdd, check_explosive=check_explosive)
 
     explosive_counter = 0
+    # Stability-truncation accounting: Phi proposals drawn and rejections by
+    # the is_explosive() check, split between the forward Gibbs draw and the
+    # Metropolis-within-Gibbs backward pass (which auto-rejects explosive
+    # proposals before the likelihood-ratio acceptance).
+    stability_proposals = 0
+    stability_rejected = 0
+    stability_proposals_backward = 0
+    stability_rejected_backward = 0
     valid_draws = []
     mdd_list = [np.nan] * (len(mbfvar_data.frequencies)-1) if return_mdd else None
 
@@ -892,6 +900,8 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     if not is_explosive(Phi, n, p):
                         break
                     attempts += 1
+                stability_rejected += attempts
+                stability_proposals += attempts + (1 if attempts < max_it_stable else 0)
                 if attempts == max_it_stable:
                     explosive_counter += 1
                     print(f"Explosive VAR detected {explosive_counter} times.")
@@ -1381,16 +1391,18 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 if check_explosive:
                     _explosive_prop = True
                     _Phi_prop = None
-                    for _ in range(max_it_stable):
+                    for _try in range(max_it_stable):
                         _sigma_chol_p = cholcovOrEigendecomp(np.kron(_sigma_prop, _inv_x_p))
                         _phi_new_p = (
                             np.squeeze(_Phi_tilde_p.reshape(_n_p*(_n_p*_p_spec+1), 1, order="F"))
                             + _sigma_chol_p @ np.random.standard_normal(_sigma_chol_p.shape[0])
                         )
                         _Phi_prop = _phi_new_p.reshape(_n_p*_p_spec+1, _n_p, order="F")
+                        stability_proposals_backward += 1
                         if not is_explosive(_Phi_prop, _n_p, _p_spec):
                             _explosive_prop = False
                             break
+                        stability_rejected_backward += 1
 
                     if _explosive_prop:
                         continue  # auto-reject explosive proposals
@@ -1617,6 +1629,19 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     self.select_list = select_list        
     self.var_of_interest = var_of_interest
     self.explosive_counter = explosive_counter
+    # Stability-truncation shares; NaN when check_explosive was off.
+    self.stability_proposals = stability_proposals
+    self.stability_rejected = stability_rejected
+    self.stability_rejection_share = (
+        stability_rejected / stability_proposals if stability_proposals > 0
+        else float("nan")
+    )
+    self.stability_proposals_backward = stability_proposals_backward
+    self.stability_rejected_backward = stability_rejected_backward
+    self.stability_rejection_share_backward = (
+        stability_rejected_backward / stability_proposals_backward
+        if stability_proposals_backward > 0 else float("nan")
+    )
     self.valid_draws = [draw for draw in valid_draws if draw >= self.nburn/self.thining]
     # MH acceptance rates per block (Version 2)
     self.mh_accept_counts = mh_accept_counts
