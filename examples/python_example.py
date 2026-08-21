@@ -1,3 +1,5 @@
+import os
+
 import MBFVAR
 import pandas as pd
 import numpy as np 
@@ -7,7 +9,7 @@ import pickle
 # Preparations
 #---------------------
 
-io_data = "/home/u80856195/git/MUFBVAR-master/examples/hist.xlsx"
+io_data = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hist.xlsx")
 
 #Model Specification
 H = 96          # forecast horizon

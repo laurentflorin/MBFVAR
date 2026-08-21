@@ -1,10 +1,18 @@
 """
 Test ragged-edge handling in MBFVAR
 """
+import os
 import sys
+
 import numpy as np
 
-sys.path.insert(0, '/home/runner/work/MBFVAR/MBFVAR')
+# Run against the installed MBFVAR (pip install .), not the source tree beside
+# this file. Python puts a script's own directory on sys.path automatically,
+# and that directory holds an MBFVAR/ package with no compiled cholcov
+# extension, which would shadow the working install; drop it.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:] = [p for p in sys.path
+               if os.path.abspath(p or os.getcwd()) != _HERE]
 
 from MBFVAR.mfbvar_funcs import _filter_valid_var_rows, calc_yyact, mdd_
 
