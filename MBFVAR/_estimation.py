@@ -43,6 +43,7 @@ import copy
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
 from .mfbvar_funcs import calc_yyact, is_explosive, mdd_
+from ._mh_proposals import palindromic_proposal_ss, build_block_matrices
 # for hyperparameter tuning
 
 
@@ -175,7 +176,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic'):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -211,6 +212,19 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         - ``'chan_poon_zhu'``: the Chan, Poon & Zhu (2024) conditionally-Gaussian
           latent-state sampler with common stochastic volatility, adapted to each
           bi-frequency block.
+    sampler : str
+        ``'exact'`` (default) runs the Metropolis-within-Gibbs cross-block
+        correction after every forward sweep, targeting the exact joint
+        posterior; ``'cut'`` skips the correction entirely, so each block is
+        sampled from its local (cut) posterior with no downstream feedback.
+    mh_proposal : str
+        Proposal kernel of the Metropolis-within-Gibbs correction (ignored
+        when ``sampler='cut'``).  ``'palindromic'`` (default) uses the
+        reversible states-parameters-states palindrome for which the
+        downstream-likelihood acceptance ratio is exactly valid;
+        ``'systematic'`` reproduces the legacy systematic-scan proposal
+        bit-for-bit (invariant but not reversible; see
+        ``docs/proposal_kernel.md`` in the paper repository).
 
     Returns
     -------
@@ -222,7 +236,15 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     valid_methods = ('schorfheide_song', 'chan_poon_zhu')
     if method not in valid_methods:
         raise ValueError(f"Invalid method: {method!r}. Choose one of {valid_methods}.")
+    valid_samplers = ('exact', 'cut')
+    if sampler not in valid_samplers:
+        raise ValueError(f"Invalid sampler: {sampler!r}. Choose one of {valid_samplers}.")
+    valid_proposals = ('palindromic', 'systematic')
+    if mh_proposal not in valid_proposals:
+        raise ValueError(f"Invalid mh_proposal: {mh_proposal!r}. Choose one of {valid_proposals}.")
     self.method = method
+    self.sampler = sampler
+    self.mh_proposal = mh_proposal
     if seed is None:
         seed = getattr(self, 'seed', 0)
     self.seed = seed
@@ -231,7 +253,8 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         from ._estimation_cpz import fit_cpz
         return fit_cpz(self, mbfvar_data, hyp, var_of_interest=var_of_interest,
                        temp_agg=temp_agg, max_it_stable=max_it_stable,
-                       return_mdd=return_mdd, check_explosive=check_explosive)
+                       return_mdd=return_mdd, check_explosive=check_explosive,
+                       sampler=sampler, mh_proposal=mh_proposal)
 
     explosive_counter = 0
     # Stability-truncation accounting: Phi proposals drawn and rejections by
@@ -1168,7 +1191,127 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         # that is absent from the plain Gibbs forward sweep.
         # ----------------------------------------------------------------
         for _m in range(M_blks - 1):
+            if self.sampler == 'cut':
+                # Cut posterior: no cross-block correction at all.
+                break
             mh_total_counts[_m] += 1
+            if self.mh_proposal == 'palindromic':
+                # Reversible states-parameters-states palindrome; the
+                # downstream-likelihood acceptance ratio is exactly valid
+                # for it (docs/proposal_kernel.md, section 5).
+                try:
+                    _ll_cur = _kalman_filter_loglik_block(
+                        GAMMAs_list[_m+1], GAMMAz_list[_m+1], GAMMAc_list[_m+1], GAMMAu_list[_m+1],
+                        LAMBDAs_list[_m+1], LAMBDAz_list[_m+1], LAMBDAc_list[_m+1], LAMBDAu_list[_m+1],
+                        LAMBDAs_t_list[_m+1], LAMBDAz_t_list[_m+1], LAMBDAc_t_list[_m+1], LAMBDAu_t_list[_m+1],
+                        sig_qq_list[_m+1], sig_mm_list[_m+1], sig_mq_list[_m+1], sig_qm_list[_m+1],
+                        _mh_At_init[_m+1], _mh_Pt_init[_m+1],
+                        Zm_list[_m+1], Ym_list[_m+1], Yq_list[_m+1],
+                        nobs_list[_m+1], T0_list[_m+1], freq_ratio_list[_m+1],
+                    )
+
+                    _prop = palindromic_proposal_ss(
+                        Phi_list[_m], sigma_list[_m],
+                        self.hyp[_m], nlags_list_[_m], self.nex,
+                        _mh_At_init[_m], _mh_Pt_init[_m],
+                        Zm_list[_m], Ym_list[_m], Yq_list[_m],
+                        YDATA_list[_m], index_NY_list[_m],
+                        nobs_list[_m], Tnobs_list[_m], Tnew_list[_m],
+                        T0_list[_m], freq_ratio_list[_m],
+                        Nm_list[_m], Nq_list[_m], nv_list[_m], int(p_list[_m]),
+                        self.temp_agg, check_explosive, max_it_stable,
+                    )
+                    stability_proposals_backward += _prop["stab_proposals"]
+                    stability_rejected_backward += _prop["stab_rejected"]
+                    if _prop["Phi"] is None:
+                        continue  # auto-reject (explosive cap / degenerate regression)
+
+                    # Proposed downstream input from the FINAL state draw
+                    if var_of_interest is None:
+                        _YQ0_prop = _prop["YYact"]
+                    else:
+                        _idx_voi_m = list(filter(
+                            lambda x: YMX_list[_m].columns.tolist()[x] in var_of_interest,
+                            range(len(YMX_list[_m].columns.tolist()))
+                        ))
+                        _idx_vars_p = np.concatenate((
+                            np.array(_idx_voi_m),
+                            YM_list[_m].shape[1] + np.array(idx_var_of_interest)
+                        ))
+                        _YQ0_prop = _prop["YYact"][:, np.int_(_idx_vars_p)].reshape(
+                            -1, len(_idx_vars_p)
+                        )
+                    _YQ_prop = np.kron(_YQ0_prop, np.ones((freq_ratio_list[_m+1], 1)))
+                    _expected_rows = YQ_list[_m+1].shape[0]
+                    if _YQ_prop.shape[0] != _expected_rows:
+                        if _YQ_prop.shape[0] > _expected_rows:
+                            _YQ_prop = _YQ_prop[:_expected_rows, :]
+                        else:
+                            _pad = np.tile(_YQ_prop[-1:, :], (_expected_rows - _YQ_prop.shape[0], 1))
+                            _YQ_prop = np.vstack((_YQ_prop, _pad))
+                    _Yq_prop = _YQ_prop[T0_list[_m+1]:nobs_list[_m+1]+T0_list[_m+1], :]
+
+                    _ll_prop = _kalman_filter_loglik_block(
+                        GAMMAs_list[_m+1], GAMMAz_list[_m+1], GAMMAc_list[_m+1], GAMMAu_list[_m+1],
+                        LAMBDAs_list[_m+1], LAMBDAz_list[_m+1], LAMBDAc_list[_m+1], LAMBDAu_list[_m+1],
+                        LAMBDAs_t_list[_m+1], LAMBDAz_t_list[_m+1], LAMBDAc_t_list[_m+1], LAMBDAu_t_list[_m+1],
+                        sig_qq_list[_m+1], sig_mm_list[_m+1], sig_mq_list[_m+1], sig_qm_list[_m+1],
+                        _mh_At_init[_m+1], _mh_Pt_init[_m+1],
+                        Zm_list[_m+1], Ym_list[_m+1], _Yq_prop,
+                        nobs_list[_m+1], T0_list[_m+1], freq_ratio_list[_m+1],
+                    )
+
+                    _log_alpha = _ll_prop - _ll_cur
+                    if np.isnan(_log_alpha) or not np.isfinite(_ll_prop):
+                        _log_alpha = -np.inf
+
+                    if np.log(np.random.uniform()) < _log_alpha:
+                        # ---- Accept proposal ----
+                        mh_accept_counts[_m] += 1
+                        At_draw_list[_m] = _prop["At_draw"]
+                        Pmean_list[_m] = _prop["Pmean"]
+                        Phi_list[_m] = _prop["Phi"]
+                        sigma_list[_m] = _prop["sigma"]
+
+                        _mats = build_block_matrices(
+                            _prop["Phi"], _prop["sigma"],
+                            Nm_list[_m], Nq_list[_m], int(p_list[_m]),
+                            freq_ratio_list[_m], self.temp_agg,
+                        )
+                        if Nm_list[_m]:
+                            sig_mm_list[_m] = _mats["sig_mm"]
+                            sig_mq_list[_m] = _mats["sig_mq"]
+                            sig_qm_list[_m] = _mats["sig_qm"]
+                            sig_qq_list[_m] = _mats["sig_qq"]
+                        else:
+                            sig_qq_list[_m] = _mats["sig_qq"]
+                        GAMMAs_list[_m] = _mats["GAMMAs"]
+                        GAMMAz_list[_m] = _mats["GAMMAz"]
+                        GAMMAc_list[_m] = _mats["GAMMAc"]
+                        GAMMAu_list[_m] = _mats["GAMMAu"]
+                        LAMBDAs_list[_m] = _mats["LAMBDAs"]
+                        LAMBDAz_list[_m] = _mats["LAMBDAz"]
+                        LAMBDAc_list[_m] = _mats["LAMBDAc"]
+                        LAMBDAu_list[_m] = _mats["LAMBDAu"]
+                        Wmatrix_list[_m] = _mats["W"]
+                        LAMBDAs_t_list[_m] = _mats["LAMBDAs_t"]
+                        LAMBDAz_t_list[_m] = _mats["LAMBDAz_t"]
+                        LAMBDAc_t_list[_m] = _mats["LAMBDAc_t"]
+                        LAMBDAu_t_list[_m] = _mats["LAMBDAu_t"]
+
+                        if j % self.thining == 0:
+                            _jt = int(j / self.thining)
+                            Sigmap_list[_m][_jt, :, :] = _prop["sigma"]
+                            Phip_list[_m][_jt, :, :] = _prop["Phi"]
+                            Cons_list[_m][_jt, :] = _prop["Phi"][-1, :]
+
+                        YQ_list[_m+1] = _YQ_prop
+                        Yq_list[_m+1] = _Yq_prop
+                        YDATA_list[_m+1][:T_list[_m+1], Nm_list[_m+1]:] = _YQ_prop
+                except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                    continue  # auto-reject on any numerical failure
+                continue
+
             try:
 
                 # Current log-likelihood of block (_m+1) given current Yq_{m+1}

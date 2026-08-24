@@ -203,6 +203,127 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
     )
 
 
+def _draw_cpz_block_palindromic(b, lf_obs, hyp_b, theta_defaults, temp_agg,
+                                check_explosive, max_it_stable):
+    """Reversible (palindromic) MwG proposal for one CPZ block.
+
+    The legacy proposal (:func:`_draw_cpz_block`) is a systematic scan
+    ``s, beta, Sig, h, sigh2, rho`` -- invariant w.r.t. the block's local
+    posterior but NOT reversible, so the downstream-likelihood acceptance
+    ratio is not exactly valid for it (see ``docs/proposal_kernel.md``).
+    This variant runs the palindromic sweep
+
+        s, beta, Sig, h, sigh2, rho, sigh2, h, Sig, beta, s
+
+    (the forward scan followed by the same component updates mirrored
+    around ``rho``) and proposes the end state.  Every component is the
+    same full-conditional kernel as in the forward scan; a palindrome of
+    reversible components is self-adjoint w.r.t. the local posterior,
+    hence reversible.  Two deliberate differences from the legacy scan,
+    both required for the components to be reversible kernels:
+
+    * ``sample_CSV`` is called with ``is_forced_accept=False`` so the SV
+      update is a genuine (reversible) MH step rather than a forced
+      accept of the Gaussian approximation;
+    * a forced posterior-mean fallback in the beta draw (explosive cap
+      exhausted) auto-rejects the whole proposal instead of being
+      silently kept -- a deterministic fallback is not a valid kernel
+      move.
+
+    Returns None when the proposal must be treated as an auto-reject.
+    """
+    n, p, r, Nm, Nq = b["nv"], b["p"], b["r"], b["Nm"], b["Nq"]
+    Tstar, nQ = b["Tstar"], b["nQ"]
+    Y_con = _constraint_targets(lf_obs, b["con_index"])
+
+    theta = (
+        float(hyp_b[0]) ** 2,
+        float(hyp_b[1]),
+        theta_defaults[0],
+        theta_defaults[1],
+    )
+    invVbeta = b["invVbeta"]
+
+    # ---------------- forward half: s, beta, Sig, h, sigh2, rho ----------
+    Y1 = sample_latent_states(
+        b["YM_block"], b["beta"], b["invSig"], b["h"],
+        n, Nm, Nq, p, r, nQ, Y_con,
+        b["M_o"], b["M_u"], b["M_a"], b["obs_idx"], temp_agg)
+
+    Y_reg, X_reg = _build_var_regressors(Y1, n, p)
+    if invVbeta is None:
+        AR_s2 = get_resid_var(Y1)
+        AR_s2 = np.where(AR_s2 <= 0, 1e-8, AR_s2)
+        invVbeta = construct_minnesota(AR_s2, n, p, theta)
+
+    beta1, forced1 = _draw_beta(
+        Y_reg, X_reg, b["invSig"], b["h"], invVbeta,
+        n, p, check_explosive, max_it_stable)
+    if forced1:
+        return None
+
+    err = Y_reg - X_reg @ beta1
+    D = np.exp(-b["h"])
+    S = 100.0 * np.eye(n) + err.T @ (err * D[:, None])
+    scale = np.linalg.inv(S)
+    scale = 0.5 * (scale + scale.T)
+    invSig1 = np.atleast_2d(wishart.rvs(df=Y_reg.shape[0] + n + 3, scale=scale))
+
+    R1 = cholesky(invSig1, lower=False)
+    s2 = np.sum((err @ R1) ** 2, axis=1)
+    h1, _ = sample_CSV(s2, b["rho"], b["sigh2"], b["h"], n, False)
+
+    eh = h1[1:] - b["rho"] * h1[:-1]
+    sigh2_1 = 1.0 / np.random.gamma(
+        10 + Y_reg.shape[0] / 2.0,
+        1.0 / (0.004 + np.sum(eh ** 2) / 2.0),
+    )
+    hlag = h1[:-1]
+    K_rho = hlag @ hlag / sigh2_1 + 100.0
+    rho1 = (hlag @ h1[1:] / sigh2_1) / K_rho + np.random.randn() / math.sqrt(K_rho)
+
+    # ---------------- mirrored half: sigh2, h, Sig, beta, s --------------
+    eh2 = h1[1:] - rho1 * h1[:-1]
+    sigh2_2 = 1.0 / np.random.gamma(
+        10 + Y_reg.shape[0] / 2.0,
+        1.0 / (0.004 + np.sum(eh2 ** 2) / 2.0),
+    )
+
+    h2, _ = sample_CSV(s2, rho1, sigh2_2, h1, n, False)
+
+    D2 = np.exp(-h2)
+    S2 = 100.0 * np.eye(n) + err.T @ (err * D2[:, None])
+    scale2 = np.linalg.inv(S2)
+    scale2 = 0.5 * (scale2 + scale2.T)
+    invSig2 = np.atleast_2d(wishart.rvs(df=Y_reg.shape[0] + n + 3, scale=scale2))
+
+    beta2, forced2 = _draw_beta(
+        Y_reg, X_reg, invSig2, h2, invVbeta,
+        n, p, check_explosive, max_it_stable)
+    if forced2:
+        return None
+
+    Y2 = sample_latent_states(
+        b["YM_block"], beta2, invSig2, h2,
+        n, Nm, Nq, p, r, nQ, Y_con,
+        b["M_o"], b["M_u"], b["M_a"], b["obs_idx"], temp_agg)
+
+    Sigma = np.linalg.inv(invSig2) * math.exp(h2[-1])
+    Sigma = 0.5 * (Sigma + Sigma.T)
+
+    return dict(
+        Y_new=Y2,
+        beta=beta2,
+        invSig=invSig2,
+        h=h2,
+        rho=rho1,
+        sigh2=sigh2_2,
+        Sigma=Sigma,
+        invVbeta=invVbeta,
+        forced=False,
+    )
+
+
 def _apply_cpz_block_draw(b, draw):
     """Persist a CPZ block draw into the mutable block state."""
     b["Y_new"] = draw["Y_new"]
@@ -243,7 +364,8 @@ def _store_cpz_block_draw(bi, j_temp, b, Phip_list, Sigmap_list, h_list):
 
 
 def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
-            max_it_stable=1000, return_mdd=False, check_explosive=True):
+            max_it_stable=1000, return_mdd=False, check_explosive=True,
+            sampler="exact", mh_proposal="palindromic"):
     """Estimate the MBFVAR model with the Chan--Poon--Zhu (CPZ) approach.
 
     This is the ``method="chan_poon_zhu"`` estimation path.  See the module
@@ -273,6 +395,14 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
         NaN is returned.
     check_explosive : bool, optional
         If True, reject explosive VAR draws.
+    sampler : {'exact', 'cut'}, optional
+        ``'exact'`` (default) runs the Metropolis-within-Gibbs cross-block
+        correction; ``'cut'`` skips it (cut posterior, no downstream
+        feedback).
+    mh_proposal : {'palindromic', 'systematic'}, optional
+        MwG proposal kernel; ``'palindromic'`` (default) is the reversible
+        variant, ``'systematic'`` the legacy scan (see
+        ``docs/proposal_kernel.md``).  Ignored when ``sampler='cut'``.
 
     Returns
     -------
@@ -280,6 +410,13 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
         ``numpy.nan`` if ``return_mdd`` is True, otherwise None.
     """
     assert temp_agg in ("mean", "sum"), f"Invalid temp_agg: {temp_agg}. Choose 'mean' or 'sum'."
+    if sampler not in ("exact", "cut"):
+        raise ValueError(f"Invalid sampler: {sampler!r}. Choose 'exact' or 'cut'.")
+    if mh_proposal not in ("palindromic", "systematic"):
+        raise ValueError(
+            f"Invalid mh_proposal: {mh_proposal!r}. Choose 'palindromic' or 'systematic'.")
+    self.sampler = sampler
+    self.mh_proposal = mh_proposal
 
     self.method = "chan_poon_zhu"
     self.nex = 1
@@ -500,6 +637,9 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
         # same precision system used by sample_latent_states().
         # ----------------------------------------------------------------
         for _m in range(M - 1):
+            if sampler == "cut":
+                # Cut posterior: no cross-block correction at all.
+                break
             mh_total_counts[_m] += 1
             try:
                 current_out = blocks[_m]["out"]
@@ -510,9 +650,16 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                 else:
                     upstream_lf_obs = blocks[_m - 1]["out"]
 
-                proposal = _draw_cpz_block(
-                    blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
-                    temp_agg, check_explosive, max_it_stable)
+                if mh_proposal == "palindromic":
+                    proposal = _draw_cpz_block_palindromic(
+                        blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
+                        temp_agg, check_explosive, max_it_stable)
+                    if proposal is None:
+                        continue  # auto-reject (forced beta fallback)
+                else:
+                    proposal = _draw_cpz_block(
+                        blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
+                        temp_agg, check_explosive, max_it_stable)
                 proposed_out = _cpz_block_output(
                     proposal["Y_new"], blocks[_m], var_of_interest,
                     idx_voi_m, idx_voi_q)
