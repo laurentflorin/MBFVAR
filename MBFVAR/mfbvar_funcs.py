@@ -366,7 +366,7 @@ def mdd_(hyp, YY, spec):
     return mdd, YYact, YYdum, XXact, XXdum
             
 
-def calc_yyact(hyp, YY, spec):
+def calc_yyact(hyp, YY, spec, premom=None):
     """
 
     Parameters
@@ -377,8 +377,14 @@ def calc_yyact(hyp, YY, spec):
         DESCRIPTION.
     spec : TYPE
         DESCRIPTION.
-    efficient : TYPE
-        DESCRIPTION.
+    premom : ndarray of shape (nv, 2) or None
+        Fixed pre-sample moments (mean, std per variable) for the Minnesota
+        dummy observations.  None (default) reproduces the legacy behaviour
+        of computing them from the first ``T0+16`` rows of ``YY`` -- note
+        that those rows contain drawn latent states, so the legacy dummy
+        prior is state-dependent; passing fixed moments makes the prior a
+        proper (state-independent) NIW prior, which the Geweke
+        getting-it-right test requires.
 
     Returns
     -------
@@ -397,10 +403,11 @@ def calc_yyact(hyp, YY, spec):
 
     #Obtain mean and standard deviation from expanded pre-sample data
 
-    YY0 = YY[:int(T0+16),:]
-    ybar    =   np.mean(YY0, axis = 0)[:,np.newaxis]
-    sbar    =   np.std(YY0, axis = 0, ddof = 1)[:,np.newaxis]
-    premom = np.hstack((ybar, sbar))
+    if premom is None:
+        YY0 = YY[:int(T0+16),:]
+        ybar    =   np.mean(YY0, axis = 0)[:,np.newaxis]
+        sbar    =   np.std(YY0, axis = 0, ddof = 1)[:,np.newaxis]
+        premom = np.hstack((ybar, sbar))
 
 
     # Create Matrices with dummy observations

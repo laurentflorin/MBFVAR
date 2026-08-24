@@ -104,6 +104,55 @@ class TestSamplerFlags(unittest.TestCase):
                 np.array_equal(m_exact.Phip_list[0], m_cut.Phip_list[0]))
 
 
+class TestGewekeSupportKnobs(unittest.TestCase):
+    """Structural tests of the opt-in knobs the Geweke test needs."""
+
+    PREMOM = [np.hstack((np.zeros((2, 1)), np.ones((2, 1)))),
+              np.hstack((np.zeros((3, 1)), np.ones((3, 1))))]
+
+    def test_fixed_premom_changes_the_prior(self):
+        m_legacy = small_fit()
+        m_fixed = small_fit(prior_premom=self.PREMOM)
+        self.assertFalse(np.array_equal(m_legacy.Phip_list[-1],
+                                        m_fixed.Phip_list[-1]))
+        self.assertTrue(np.isfinite(m_fixed.Phip_list[-1]).all())
+
+    def test_premom_rejected_with_return_mdd(self):
+        data_in = make_small_dataset()
+        model = MBFVAR.MixedFrequencyBVAR(2, 0.5, NLAGS, 1)
+        with self.assertRaises(ValueError):
+            model.fit(data_in, hyp=HYP, prior_premom=self.PREMOM,
+                      return_mdd=True)
+
+    def test_fixed_kf_init_runs(self):
+        model = small_fit(kf_init="fixed")
+        self.assertEqual(model.kf_init, "fixed")
+        self.assertTrue(np.isfinite(model.Phip_list[-1]).all())
+
+    def test_init_params_warm_start_is_one_transition(self):
+        ref = small_fit()
+        init = [{"Phi": ref.Phip_list[b][-1], "sigma": ref.Sigmap_list[b][-1]}
+                for b in range(2)]
+        kw = dict(kf_init="fixed", prior_premom=self.PREMOM, init_params=init)
+        data_in = make_small_dataset()
+        m1 = MBFVAR.MixedFrequencyBVAR(1, 0.0, NLAGS, 1)
+        m1.fit(data_in, hyp=HYP, seed=7, **kw)
+        # the transition moved theta and is deterministic under the seed
+        self.assertFalse(np.allclose(m1.Phip_list[0][0], init[0]["Phi"]))
+        m2 = MBFVAR.MixedFrequencyBVAR(1, 0.0, NLAGS, 1)
+        m2.fit(make_small_dataset(), hyp=HYP, seed=7, **kw)
+        np.testing.assert_array_equal(m1.Phip_list[0][0], m2.Phip_list[0][0])
+        np.testing.assert_array_equal(m1.Phip_list[1][0], m2.Phip_list[1][0])
+
+    def test_init_params_wrong_length_raises(self):
+        data_in = make_small_dataset()
+        model = MBFVAR.MixedFrequencyBVAR(1, 0.0, NLAGS, 1)
+        with self.assertRaises(ValueError):
+            model.fit(data_in, hyp=HYP,
+                      init_params=[{"Phi": np.zeros((1, 1)),
+                                    "sigma": np.eye(1)}])
+
+
 class TestSamplerFlagsCPZ(unittest.TestCase):
     def test_cpz_palindromic_runs(self):
         model = small_fit(method="chan_poon_zhu")

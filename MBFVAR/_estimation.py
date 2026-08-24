@@ -176,7 +176,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic'):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -225,6 +225,31 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         ``'systematic'`` reproduces the legacy systematic-scan proposal
         bit-for-bit (invariant but not reversible; see
         ``docs/proposal_kernel.md`` in the paper repository).
+    prior_premom : list of ndarray or None
+        Optional fixed pre-sample moments per block (each of shape
+        ``(nv_m, 2)``: mean and std per variable) for the Minnesota dummy
+        observations.  None (default) keeps the legacy behaviour of
+        recomputing them each sweep from the completed data (which makes
+        the dummy prior state-dependent).  Fixed moments define a proper,
+        state-independent NIW prior -- required by the Geweke
+        getting-it-right test.  Not supported together with
+        ``return_mdd=True``.
+    kf_init : str
+        ``'adaptive'`` (default, legacy) re-initialises each block's
+        balanced Kalman filter at every sweep from the previous sweep's
+        first smoothed state.  ``'fixed'`` keeps the sweep-0 initial
+        conditions (zero mean, Lyapunov covariance under the fixed
+        initialisation constants) for every sweep, which makes the
+        sampler a Markov chain with a fixed, well-defined target whose
+        inter-sweep state is the parameters alone.
+    init_params : list of dict or None
+        Optional warm start: one dict per block with keys ``'Phi'``
+        (``(nv*p+1, nv)``) and ``'sigma'`` (``(nv, nv)``).  When given,
+        the first sweep runs from these parameter values instead of the
+        default initialisation, so a single-sweep fit
+        (``nsim=1``) is exactly one transition of the sampler from that
+        state -- the building block of the successive-conditional
+        simulator in the Geweke test.
 
     Returns
     -------
@@ -242,9 +267,17 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     valid_proposals = ('palindromic', 'systematic')
     if mh_proposal not in valid_proposals:
         raise ValueError(f"Invalid mh_proposal: {mh_proposal!r}. Choose one of {valid_proposals}.")
+    if kf_init not in ('adaptive', 'fixed'):
+        raise ValueError(f"Invalid kf_init: {kf_init!r}. Choose 'adaptive' or 'fixed'.")
+    if prior_premom is not None and return_mdd:
+        raise ValueError("prior_premom is not supported together with return_mdd=True "
+                         "(the MDD path computes its own pre-sample moments).")
     self.method = method
     self.sampler = sampler
     self.mh_proposal = mh_proposal
+    self.kf_init = kf_init
+    self._prior_premom = prior_premom
+    self._init_params = init_params
     if seed is None:
         seed = getattr(self, 'seed', 0)
     self.seed = seed
@@ -518,7 +551,42 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     Ym_list.append(YM_list[0][T0_list[0]:nobs_list[0]+T0_list[0],:])
     
     Yq_list.append(YQ_list[0][T0_list[0]:nobs_list[0]+T0_list[0],:])
-    
+
+    # Optional warm start (init_params): overwrite block 0's parameters and
+    # the KF matrices built from them.  Deliberately applied AFTER Pt_list[0]
+    # (the filter's initial covariance) is computed from the fixed
+    # initialisation constants, so the model's initial condition stays
+    # parameter-independent.
+    if self._init_params is not None:
+        if len(self._init_params) != len(YMh_list):
+            raise ValueError(
+                f"init_params must have one entry per block "
+                f"({len(YMh_list)}), got {len(self._init_params)}.")
+        _ip0 = self._init_params[0]
+        Phi_list[0] = np.asarray(_ip0['Phi'], dtype=float)
+        sigma_list[0] = np.asarray(_ip0['sigma'], dtype=float)
+        _im0 = build_block_matrices(
+            Phi_list[0], sigma_list[0], Nm_list[0], Nq_list[0],
+            int(p_list[0]), freq_ratio_list[0], self.temp_agg)
+        if Nm_list[0]:
+            sig_mm_list[0] = _im0["sig_mm"]
+            sig_mq_list[0] = _im0["sig_mq"]
+            sig_qm_list[0] = _im0["sig_qm"]
+        sig_qq_list[0] = _im0["sig_qq"]
+        GAMMAs_list[0] = _im0["GAMMAs"]
+        GAMMAz_list[0] = _im0["GAMMAz"]
+        GAMMAc_list[0] = _im0["GAMMAc"]
+        GAMMAu_list[0] = _im0["GAMMAu"]
+        LAMBDAs_list[0] = _im0["LAMBDAs"]
+        LAMBDAz_list[0] = _im0["LAMBDAz"]
+        LAMBDAc_list[0] = _im0["LAMBDAc"]
+        LAMBDAu_list[0] = _im0["LAMBDAu"]
+        Wmatrix_list[0] = _im0["W"]
+        LAMBDAs_t_list[0] = _im0["LAMBDAs_t"]
+        LAMBDAz_t_list[0] = _im0["LAMBDAz_t"]
+        LAMBDAc_t_list[0] = _im0["LAMBDAc_t"]
+        LAMBDAu_t_list[0] = _im0["LAMBDAu_t"]
+
     # Estimation
     #################
     print(" ", end = '\n')
@@ -535,14 +603,26 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     mh_total_counts = [0] * (M_blks - 1)
     _mh_At_init = [None] * M_blks
     _mh_Pt_init = [None] * M_blks
+    # Fixed sweep-0 KF initial conditions (used every sweep under
+    # kf_init='fixed'; captured at j == 0 below)
+    _kf_fixed_At = [None] * M_blks
+    _kf_fixed_Pt = [None] * M_blks
 
     for j in tqdm(range(self.nsim)):
         for m in range(len(YMh_list)):
-            
+
             # initialization
             if j > 0:
-                At_list[m] = At_draw_list[m][0,:].T 
-                Pt_list[m] = Pmean_list[m]
+                if self.kf_init == 'fixed':
+                    At_list[m] = _kf_fixed_At[m].copy()
+                    Pt_list[m] = _kf_fixed_Pt[m].copy()
+                else:
+                    At_list[m] = At_draw_list[m][0,:].T
+                    Pt_list[m] = Pmean_list[m]
+
+            if j == 0:
+                _kf_fixed_At[m] = At_list[m].copy()
+                _kf_fixed_Pt[m] = Pt_list[m].copy()
 
             # Save KF initial conditions for the MH backward correction
             _mh_At_init[m] = At_list[m].copy()
@@ -822,7 +902,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
             if return_mdd:
                 mdd_list[m], YYact, YYdum, XXact, XXdum = mdd_(self.hyp[m], YY, spec)
             else:
-                YYact, YYdum, XXact, XXdum = calc_yyact(self.hyp[m], YY, spec)
+                YYact, YYdum, XXact, XXdum = calc_yyact(
+                    self.hyp[m], YY, spec,
+                    premom=(self._prior_premom[m]
+                            if self._prior_premom is not None else None))
             
             if (j%self.thining == 0 and m == (len(YMh_list)-1)):
                 # With ragged-edge masking, YYact may be shorter than expected
@@ -1145,8 +1228,39 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     
                     Ym_list.append(YM_list[m+1][T0_list[m+1]:nobs_list[m+1]+T0_list[m+1],:])
                     Yq_list.append(YQ_list[m+1][T0_list[m+1]:nobs_list[m+1]+T0_list[m+1],:])
-                    
-                    
+
+                    # Optional warm start for the lazily created block m+1
+                    # (after its fixed initial covariance was computed, for
+                    # the same reason as for block 0 above).
+                    if self._init_params is not None:
+                        _ipn = self._init_params[m+1]
+                        Phi_list[m+1] = np.asarray(_ipn['Phi'], dtype=float)
+                        sigma_list[m+1] = np.asarray(_ipn['sigma'], dtype=float)
+                        _imn = build_block_matrices(
+                            Phi_list[m+1], sigma_list[m+1],
+                            Nm_list[m+1], Nq_list[m+1],
+                            int(p_list[m+1]), freq_ratio_list[m+1],
+                            self.temp_agg)
+                        if Nm_list[m+1]:
+                            sig_mm_list[m+1] = _imn["sig_mm"]
+                            sig_mq_list[m+1] = _imn["sig_mq"]
+                            sig_qm_list[m+1] = _imn["sig_qm"]
+                        sig_qq_list[m+1] = _imn["sig_qq"]
+                        GAMMAs_list[m+1] = _imn["GAMMAs"]
+                        GAMMAz_list[m+1] = _imn["GAMMAz"]
+                        GAMMAc_list[m+1] = _imn["GAMMAc"]
+                        GAMMAu_list[m+1] = _imn["GAMMAu"]
+                        LAMBDAs_list[m+1] = _imn["LAMBDAs"]
+                        LAMBDAz_list[m+1] = _imn["LAMBDAz"]
+                        LAMBDAc_list[m+1] = _imn["LAMBDAc"]
+                        LAMBDAu_list[m+1] = _imn["LAMBDAu"]
+                        Wmatrix_list[m+1] = _imn["W"]
+                        LAMBDAs_t_list[m+1] = _imn["LAMBDAs_t"]
+                        LAMBDAz_t_list[m+1] = _imn["LAMBDAz_t"]
+                        LAMBDAc_t_list[m+1] = _imn["LAMBDAc_t"]
+                        LAMBDAu_t_list[m+1] = _imn["LAMBDAu_t"]
+
+
                 else:
                     #Yq_list[m+1] = (np.kron(lstate, np.ones((1,freq_ratio_list[m+1])))).T
                     if var_of_interest is None:
@@ -1220,6 +1334,8 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         T0_list[_m], freq_ratio_list[_m],
                         Nm_list[_m], Nq_list[_m], nv_list[_m], int(p_list[_m]),
                         self.temp_agg, check_explosive, max_it_stable,
+                        premom=(self._prior_premom[_m]
+                                if self._prior_premom is not None else None),
                     )
                     stability_proposals_backward += _prop["stab_proposals"]
                     stability_rejected_backward += _prop["stab_rejected"]
@@ -1503,7 +1619,9 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 _spec_p = np.hstack((nlags_list_[_m], T0_list[_m], self.nex,
                                        nv_list[_m], _nobs_p))
                 _YYact_p, _YYdum_p, _XXact_p, _XXdum_p = calc_yyact(
-                    self.hyp[_m], _YY_p, _spec_p
+                    self.hyp[_m], _YY_p, _spec_p,
+                    premom=(self._prior_premom[_m]
+                            if self._prior_premom is not None else None)
                 )
                 _Tdummy_p = _YYdum_p.shape[0]
                 _Tobs_p = _YYact_p.shape[0]
