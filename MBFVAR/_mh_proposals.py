@@ -311,6 +311,86 @@ def draw_states_block(Phi, sigma, At_init, Pt_init,
     return At_draw, AT_draw, Pmean
 
 
+def lf_marginal_loglik_block(Phi, sigma, At_init, Pt_init, Zm0, Yq,
+                             nobs, T0, freq_ratio, Nm, Nq, nv, p, temp_agg):
+    """Marginal log-likelihood of a block's LOW-FREQUENCY observations
+    alone over the balanced period, integrating its high-frequency
+    observations out.
+
+    Used by the ``mh_acceptance='conditional'`` option: the coherent
+    chained generative model treats the downstream block's density
+    CONDITIONAL on its interface input, so the exact acceptance ratio
+    uses p(HF obs | interface, theta) = exp(ll_joint - ll_lf) with
+    ``ll_lf`` computed here.  The balanced Kalman filter cannot deliver
+    this (it conditions on lagged HF observations through ``Zm``), so
+    the filter here runs on the FULL companion state (all nv variables,
+    dimension nv*(p+1)) with only the aggregation measurement rows.
+
+    ``Zm0`` is the block's first lagged-HF row (``Zm[0, :]``), which
+    holds the pre-sample HF values that initialise the HF part of the
+    companion (with zero variance -- they are conditioning constants);
+    the LF part is initialised from ``(At_init, Pt_init)`` exactly as
+    the balanced filter is.
+    """
+    kn = nv * (p + 1)
+
+    # full-companion transition (same construction as the ragged-edge
+    # filter)
+    PHIF = np.zeros((kn, kn))
+    IF = np.eye(nv)
+    for i in range(p-1):
+        PHIF[(i+1)*nv:(i+2)*nv, i*nv:(i+1)*nv] = IF
+    PHIF[:nv, :nv*p] = Phi[:-1, :].T
+    CONF = np.hstack((Phi[-1, :].T, np.zeros((nv*p,))))
+    SIGF = np.zeros((kn, kn))
+    SIGF[:nv, :nv] = sigma
+
+    # aggregation measurement rows (LF only)
+    Z2 = np.zeros((Nq, kn))
+    for bb in range(Nq):
+        for ll in range(freq_ratio):
+            Z2[bb, (ll+1)*Nm + ll*Nq + bb] = \
+                (1.0/freq_ratio) if temp_agg == "mean" else 1.0
+
+    # initial full-companion state at the balanced start: per lag block
+    # rr, HF entries are the observed pre-sample values (delta mass),
+    # LF entries carry the block's initial mean/covariance
+    x = np.zeros(kn)
+    P = np.zeros((kn, kn))
+    for rr in range(p + 1):
+        if Nm and rr < p:
+            x[rr*(Nm+Nq):rr*(Nm+Nq)+Nm] = Zm0[rr*Nm:(rr+1)*Nm]
+        x[(rr+1)*Nm + rr*Nq:(rr+1)*(Nm+Nq)] = At_init[rr*Nq:(rr+1)*Nq]
+        for vv in range(p + 1):
+            P[(rr+1)*Nm + rr*Nq:(rr+1)*(Nm+Nq),
+              (vv+1)*Nm + vv*Nq:(vv+1)*(Nm+Nq)] = \
+                Pt_init[rr*Nq:(rr+1)*Nq, vv*Nq:(vv+1)*Nq]
+
+    ll = 0.0
+    for t in range(nobs):
+        xhat = PHIF @ x + CONF
+        Phat = PHIF @ P @ PHIF.T + SIGF
+        Phat = 0.5 * (Phat + Phat.T)
+        lf_step = ((t+1+T0)/freq_ratio - np.floor((t+T0+1)/freq_ratio) == 0)
+        if lf_step:
+            nut = Yq[t, :] - Z2 @ xhat
+            Ft = Z2 @ Phat @ Z2.T
+            Ft = 0.5 * (Ft + Ft.T)
+            sign, logdet = np.linalg.slogdet(Ft)
+            if sign > 0:
+                iFt = invert_matrix(Ft)
+                ll += -0.5 * (logdet + nut @ iFt @ nut
+                              + len(nut) * np.log(2.0 * np.pi))
+                sol = (Phat @ Z2.T) @ iFt
+                x = xhat + sol @ nut
+                P = Phat - sol @ (Phat @ Z2.T).T
+            else:
+                x, P = xhat, Phat
+        else:
+            x, P = xhat, Phat
+    return ll
+
+
 def build_completed_data(Ym, At_draw, AT_draw, Nm, Nq):
     """Assemble the completed (balanced + ragged-edge) block data ``YY``
     from a latent-state draw, as in the forward pass."""

@@ -43,7 +43,8 @@ import copy
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
 from .mfbvar_funcs import calc_yyact, is_explosive, mdd_
-from ._mh_proposals import palindromic_proposal_ss, build_block_matrices
+from ._mh_proposals import (palindromic_proposal_ss, build_block_matrices,
+                            lf_marginal_loglik_block)
 # for hyperparameter tuning
 
 
@@ -176,7 +177,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None, mh_acceptance = 'joint'):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -269,6 +270,12 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         raise ValueError(f"Invalid mh_proposal: {mh_proposal!r}. Choose one of {valid_proposals}.")
     if kf_init not in ('adaptive', 'fixed'):
         raise ValueError(f"Invalid kf_init: {kf_init!r}. Choose 'adaptive' or 'fixed'.")
+    if mh_acceptance not in ('joint', 'conditional'):
+        raise ValueError(f"Invalid mh_acceptance: {mh_acceptance!r}. "
+                         "Choose 'joint' or 'conditional'.")
+    if mh_acceptance == 'conditional' and mh_proposal != 'palindromic':
+        raise ValueError("mh_acceptance='conditional' is only implemented "
+                         "for mh_proposal='palindromic'.")
     if prior_premom is not None and return_mdd:
         raise ValueError("prior_premom is not supported together with return_mdd=True "
                          "(the MDD path computes its own pre-sample moments).")
@@ -276,6 +283,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     self.sampler = sampler
     self.mh_proposal = mh_proposal
     self.kf_init = kf_init
+    self.mh_acceptance = mh_acceptance
     self._prior_premom = prior_premom
     self._init_params = init_params
     if seed is None:
@@ -1376,6 +1384,23 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         Zm_list[_m+1], Ym_list[_m+1], _Yq_prop,
                         nobs_list[_m+1], T0_list[_m+1], freq_ratio_list[_m+1],
                     )
+
+                    if self.mh_acceptance == 'conditional':
+                        # coherent chained model: the downstream density is
+                        # CONDITIONAL on its interface input, so subtract
+                        # the interface-only marginal from both sides
+                        # (docs/proposal_kernel.md / the Geweke test)
+                        _lf_args = (Phi_list[_m+1], sigma_list[_m+1],
+                                    _mh_At_init[_m+1], _mh_Pt_init[_m+1],
+                                    Zm_list[_m+1][0, :])
+                        _lf_dims = (nobs_list[_m+1], T0_list[_m+1],
+                                    freq_ratio_list[_m+1], Nm_list[_m+1],
+                                    Nq_list[_m+1], nv_list[_m+1],
+                                    int(p_list[_m+1]), self.temp_agg)
+                        _ll_cur = _ll_cur - lf_marginal_loglik_block(
+                            *_lf_args, Yq_list[_m+1], *_lf_dims)
+                        _ll_prop = _ll_prop - lf_marginal_loglik_block(
+                            *_lf_args, _Yq_prop, *_lf_dims)
 
                     _log_alpha = _ll_prop - _ll_cur
                     if np.isnan(_log_alpha) or not np.isfinite(_ll_prop):
