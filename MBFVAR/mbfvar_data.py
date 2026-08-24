@@ -177,11 +177,18 @@ class mbfvar_data:
             return len(arr)
 
         for i in range(len(YMX_list)-1):
-            Nq_list.append(YQX_list[0].shape[1] + YMX_list[i].shape[1]) 
+            # Block i+1's low-frequency input is block i's COMPLETED panel,
+            # i.e. all of block i's variables (its HF variables plus its own
+            # accumulated LF set) -- the count and the transformation codes
+            # must accumulate recursively along the chain. For two frequency
+            # steps this coincides with the old "base quarterly + immediate
+            # HF" formula, which is why the mis-sizing only ever surfaced
+            # with three or more steps (B >= 3 blocks).
+            Nq_list.append(Nq_list[i] + YMX_list[i].shape[1])
             if safe_len(select_m_list[i]) == 0:
-                select_q.append( select_q[0])
+                select_q.append( select_q[i])
             else:
-                select_q.append(np.hstack((select_m_list[i], select_q[0])))
+                select_q.append(np.hstack((select_m_list[i], select_q[i])))
                 
                 
         for i in range(len(YMX_list)):

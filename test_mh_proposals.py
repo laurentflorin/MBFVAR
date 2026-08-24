@@ -153,6 +153,26 @@ class TestGewekeSupportKnobs(unittest.TestCase):
                                     "sigma": np.eye(1)}])
 
 
+class TestThreeBlockData(unittest.TestCase):
+    def test_lf_counts_accumulate_along_the_chain(self):
+        """B >= 3 blocks: each block's LF input is the previous block's
+        COMPLETED panel, so the LF variable count must accumulate
+        recursively (q; q+m; q+m+w). The old formula (base quarterly +
+        immediate HF block) mis-sized every block from the third on."""
+        idx_d = pd.bdate_range("2010-01-04", periods=400)
+        df_d = pd.DataFrame({"d_1": np.random.default_rng(0).standard_normal(400)},
+                            index=idx_d)
+        df_w = pd.DataFrame({"w_1": np.zeros(80)}, index=idx_d[4::5][:80])
+        df_m = pd.DataFrame({"m_1": np.zeros(20)}, index=idx_d[19::20][:20])
+        df_q = pd.DataFrame({"q_1": np.zeros(6)}, index=idx_d[59::60][:6])
+        trans = [np.array((1,))] * 4
+        din = MBFVAR.mbfvar_data([df_q, df_m, df_w, df_d], trans,
+                                 ["Q", "M", "W", "D"])
+        self.assertEqual(list(din.Nq_list), [1, 2, 3])
+        self.assertEqual(list(din.nv_list), [2, 3, 4])
+        self.assertEqual([len(s) for s in din.select_q], [1, 2, 3])
+
+
 class TestSamplerFlagsCPZ(unittest.TestCase):
     def test_cpz_palindromic_runs(self):
         model = small_fit(method="chan_poon_zhu")
