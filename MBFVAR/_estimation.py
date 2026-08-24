@@ -273,9 +273,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     if mh_acceptance not in ('joint', 'conditional'):
         raise ValueError(f"Invalid mh_acceptance: {mh_acceptance!r}. "
                          "Choose 'joint' or 'conditional'.")
-    if mh_acceptance == 'conditional' and mh_proposal != 'palindromic':
+    if (mh_acceptance == 'conditional' and sampler == 'exact'
+            and mh_proposal != 'palindromic'):
         raise ValueError("mh_acceptance='conditional' is only implemented "
-                         "for mh_proposal='palindromic'.")
+                         "for mh_proposal='palindromic' (or sampler='cut').")
     if prior_premom is not None and return_mdd:
         raise ValueError("prior_premom is not supported together with return_mdd=True "
                          "(the MDD path computes its own pre-sample moments).")
@@ -609,6 +610,9 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     M_blks = len(YMh_list)
     mh_accept_counts = [0] * (M_blks - 1)
     mh_total_counts = [0] * (M_blks - 1)
+    # conditional-model parameter-update MH (blocks m >= 1)
+    lf_accept_counts = [0] * M_blks
+    lf_total_counts = [0] * M_blks
     _mh_At_init = [None] * M_blks
     _mh_Pt_init = [None] * M_blks
     # Fixed sweep-0 KF initial conditions (used every sweep under
@@ -1031,7 +1035,57 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 Phi = phi_new.reshape(n*p+1, n, order = "F")
                 
             #while loop bis hier
-            
+
+            # Conditional-model correction of the parameter update for
+            # blocks that RECEIVE an interface (m >= 1). Under the coherent
+            # chained generative model, such a block's density is
+            # CONDITIONAL on its interface input, so its parameter full
+            # conditional carries an extra 1/f(interface | theta) factor
+            # relative to the conjugate NIW draw (f = marginal likelihood
+            # of the interface observations alone). The NIW draw is an
+            # exact draw from the unconditional-model full conditional, so
+            # using it as an independence proposal and accepting with
+            # f(old)/f(new) targets the conditional-model full conditional
+            # exactly. See docs/proposal_kernel.md and the Geweke test.
+            if self.mh_acceptance == 'conditional' and m >= 1:
+                lf_total_counts[m] += 1
+                # the live "previous" parameters: Phi_list[m] plus the sig_*
+                # block lists (sigma_list itself is not refreshed by the
+                # forward pass)
+                if Nm_list[m]:
+                    _sigma_old = np.block([
+                        [sig_mm_list[m], sig_mq_list[m]],
+                        [sig_qm_list[m], sig_qq_list[m]]])
+                else:
+                    _sigma_old = np.atleast_2d(sig_qq_list[m])
+                try:
+                    _lf_new = lf_marginal_loglik_block(
+                        Phi, sigma,
+                        _mh_At_init[m], _mh_Pt_init[m], Zm_list[m][0, :],
+                        Yq_list[m], nobs_list[m], T0_list[m],
+                        freq_ratio_list[m], Nm_list[m], Nq_list[m],
+                        nv_list[m], int(p_list[m]), self.temp_agg)
+                    _lf_old = lf_marginal_loglik_block(
+                        Phi_list[m], _sigma_old,
+                        _mh_At_init[m], _mh_Pt_init[m], Zm_list[m][0, :],
+                        Yq_list[m], nobs_list[m], T0_list[m],
+                        freq_ratio_list[m], Nm_list[m], Nq_list[m],
+                        nv_list[m], int(p_list[m]), self.temp_agg)
+                    _log_alpha_lf = _lf_old - _lf_new
+                    if (np.isnan(_log_alpha_lf)
+                            or not np.isfinite(_lf_new)
+                            or not np.isfinite(_lf_old)):
+                        _log_alpha_lf = 0.0  # keep the proposal on failure
+                    if np.log(np.random.uniform()) < _log_alpha_lf:
+                        lf_accept_counts[m] += 1
+                    else:
+                        # reject: keep the previous parameters
+                        Phi = Phi_list[m].copy()
+                        sigma = _sigma_old.copy()
+                except (np.linalg.LinAlgError, ValueError,
+                        FloatingPointError):
+                    lf_accept_counts[m] += 1  # keep the proposal
+
             if j > 0:
                 Phi_list[m] = Phi
             elif j == 0 and m == 0:
@@ -1932,6 +1986,12 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     # MH acceptance rates per block (Version 2)
     self.mh_accept_counts = mh_accept_counts
     self.mh_total_counts = mh_total_counts
+    self.lf_accept_counts = lf_accept_counts
+    self.lf_total_counts = lf_total_counts
+    self.lf_accept_rates = [
+        (c / t if t > 0 else float("nan"))
+        for c, t in zip(lf_accept_counts, lf_total_counts)
+    ]
     self.mh_accept_rates = [
         (c / t if t > 0 else float("nan"))
         for c, t in zip(mh_accept_counts, mh_total_counts)
