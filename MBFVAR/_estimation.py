@@ -2490,6 +2490,22 @@ def aggregate(self, frequency, reset_index = True):
         temp.index = temp.index.map(lambda x: x.replace(day=1))
         YY_full_list_agg.append(temp)
         
+
+    # ---- retain the per-draw aggregated paths (predictive draws) --------
+    # The summaries below collapse YY_full_list_agg to mean/median/quantiles
+    # and the draws are then discarded, which makes density scoring (log
+    # score, CRPS, PIT) impossible after the fact. Retaining them costs one
+    # float32 array and is additive: nothing else changes. Set
+    # ``self.retain_draws = False`` before aggregate() to skip it.
+    if getattr(self, "retain_draws", True) and len(YY_full_list_agg):
+        _first = YY_full_list_agg[0]
+        self.YY_draws_agg_columns = list(_first.columns)
+        self.YY_draws_agg_index = _first.index
+        self.YY_draws_agg = np.stack(
+            [np.asarray(_d.values, dtype=np.float32) for _d in YY_full_list_agg])
+    else:
+        self.YY_draws_agg = None
+
     self.YY_mean_agg = pd.concat(YY_full_list_agg).groupby(pd.concat(YY_full_list_agg).index).mean()
     self.YY_median_agg = pd.concat(YY_full_list_agg).groupby(pd.concat(YY_full_list_agg).index).median()
     self.YY_095_agg = pd.concat(YY_full_list_agg).groupby(pd.concat(YY_full_list_agg).index).quantile(0.95)
