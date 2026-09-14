@@ -80,6 +80,11 @@ def _draw_beta(Y_reg, X_reg, invSig, h, invVbeta_diag, n, p,
 
     Returned ``beta`` uses MBFVAR's layout ``(n*p+1, n)`` with rows
     ``[lag1..lagp, const]`` so it is directly usable as ``Phi`` downstream.
+
+    Returns ``(beta, forced, proposals, rejected)``. ``forced`` is True when
+    the attempt budget ran out and the deterministic posterior mean was
+    substituted, so the caller must count that draw separately rather than
+    treat it as a posterior draw.
     """
     D = np.exp(-h)
     XtD = X_reg.T * D                    # (k, Tnew)
@@ -96,26 +101,32 @@ def _draw_beta(Y_reg, X_reg, invSig, h, invVbeta_diag, n, p,
     tmp = solve_triangular(L, rhs, lower=True)
     mu = solve_triangular(L.T, tmp, lower=False)
 
+    # Proposal/rejection counts use the same convention as the
+    # Schorfheide-Song estimator (_estimation.py): `proposals` is every draw
+    # the stability screen looked at and `rejected` is the explosive subset,
+    # so a screen that never fires reports rejected = 0 and proposals = one
+    # per beta update. With check_explosive off nothing is screened and both
+    # stay zero, which is what makes the share NaN rather than a spurious 0.0.
     beta = None
     if check_explosive:
-        for _ in range(max_it_stable):
+        for attempt in range(max_it_stable):
             z = np.random.standard_normal(k * n)
             draw = mu + solve_triangular(L.T, z, lower=False)
             cand = draw.reshape(k, n, order="F")
             if not is_explosive(cand, n, p):
                 beta = cand
-                break
-        if beta is None:
-            # fall back to the posterior mean (guaranteed finite) if we cannot
-            # find a stationary draw within the attempt budget
-            beta = mu.reshape(k, n, order="F")
-            return beta, True
-        return beta, False
+                return beta, False, attempt + 1, attempt
+        # fall back to the posterior mean (guaranteed finite) if we cannot
+        # find a stationary draw within the attempt budget. This substitutes a
+        # deterministic point for a draw, which the SS path never does, so it
+        # is counted separately by the callers.
+        beta = mu.reshape(k, n, order="F")
+        return beta, True, max_it_stable, max_it_stable
     else:
         z = np.random.standard_normal(k * n)
         draw = mu + solve_triangular(L.T, z, lower=False)
         beta = draw.reshape(k, n, order="F")
-        return beta, False
+        return beta, False, 0, 0
 
 
 def _constraint_targets(lf_obs, con_index):
@@ -137,8 +148,24 @@ def _build_var_regressors(Y_new, n, p):
     return Y_reg, X_reg
 
 
+def _record_stability(stats, proposals, rejected, forced):
+    """Accumulate one beta draw's stability-screen counts.
+
+    Written through a mutable accumulator rather than a return value because
+    the palindromic proposal abandons the whole block on a forced fallback
+    (returning None); its counts would otherwise be the ones that never got
+    recorded, which are exactly the interesting ones.
+    """
+    if stats is None:
+        return
+    stats["proposals"] += proposals
+    stats["rejected"] += rejected
+    if forced:
+        stats["forced"] += 1
+
+
 def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
-                    check_explosive, max_it_stable):
+                    check_explosive, max_it_stable, stats=None):
     """Draw one CPZ bi-frequency block without mutating persistent state."""
     n, p, r, Nm, Nq = b["nv"], b["p"], b["r"], b["Nm"], b["Nq"]
     Tstar, nQ = b["Tstar"], b["nQ"]
@@ -163,9 +190,10 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
         AR_s2 = np.where(AR_s2 <= 0, 1e-8, AR_s2)
         invVbeta = construct_minnesota(AR_s2, n, p, theta)
 
-    beta, forced = _draw_beta(
+    beta, forced, _prop, _rej = _draw_beta(
         Y_reg, X_reg, b["invSig"], b["h"], invVbeta,
         n, p, check_explosive, max_it_stable)
+    _record_stability(stats, _prop, _rej, forced)
 
     err = Y_reg - X_reg @ beta
     D = np.exp(-b["h"])
@@ -204,7 +232,7 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
 
 
 def _draw_cpz_block_palindromic(b, lf_obs, hyp_b, theta_defaults, temp_agg,
-                                check_explosive, max_it_stable):
+                                check_explosive, max_it_stable, stats=None):
     """Reversible (palindromic) MwG proposal for one CPZ block.
 
     The legacy proposal (:func:`_draw_cpz_block`) is a systematic scan
@@ -256,9 +284,10 @@ def _draw_cpz_block_palindromic(b, lf_obs, hyp_b, theta_defaults, temp_agg,
         AR_s2 = np.where(AR_s2 <= 0, 1e-8, AR_s2)
         invVbeta = construct_minnesota(AR_s2, n, p, theta)
 
-    beta1, forced1 = _draw_beta(
+    beta1, forced1, _prop1, _rej1 = _draw_beta(
         Y_reg, X_reg, b["invSig"], b["h"], invVbeta,
         n, p, check_explosive, max_it_stable)
+    _record_stability(stats, _prop1, _rej1, forced1)
     if forced1:
         return None
 
@@ -297,9 +326,10 @@ def _draw_cpz_block_palindromic(b, lf_obs, hyp_b, theta_defaults, temp_agg,
     scale2 = 0.5 * (scale2 + scale2.T)
     invSig2 = np.atleast_2d(wishart.rvs(df=Y_reg.shape[0] + n + 3, scale=scale2))
 
-    beta2, forced2 = _draw_beta(
+    beta2, forced2, _prop2, _rej2 = _draw_beta(
         Y_reg, X_reg, invSig2, h2, invVbeta,
         n, p, check_explosive, max_it_stable)
+    _record_stability(stats, _prop2, _rej2, forced2)
     if forced2:
         return None
 
@@ -575,6 +605,13 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     valid_draws = []
     mh_accept_counts = [0] * max(M - 1, 0)
     mh_total_counts = [0] * max(M - 1, 0)
+    # The CPZ path DOES screen explosive draws (unlike SBFVAR's CPZ path,
+    # which has no screen at all), so it reports the same counters as the
+    # Schorfheide-Song estimator. `forced` has no SS analogue: it counts the
+    # draws where the attempt budget ran out and a deterministic posterior
+    # mean was substituted for a draw.
+    stab_forward = {"proposals": 0, "rejected": 0, "forced": 0}
+    stab_backward = {"proposals": 0, "rejected": 0, "forced": 0}
 
     print(" ", end="\n")
     print("Multi Frequency BVAR: Estimation (Chan-Poon-Zhu)", end="\n")
@@ -600,7 +637,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
 
             draw = _draw_cpz_block(
                 b, lf_obs, self.hyp[bi], theta_defaults, temp_agg,
-                check_explosive, max_it_stable)
+                check_explosive, max_it_stable, stats=stab_forward)
             _apply_cpz_block_draw(b, draw)
 
             if store:
@@ -653,13 +690,15 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                 if mh_proposal == "palindromic":
                     proposal = _draw_cpz_block_palindromic(
                         blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
-                        temp_agg, check_explosive, max_it_stable)
+                        temp_agg, check_explosive, max_it_stable,
+                        stats=stab_backward)
                     if proposal is None:
                         continue  # auto-reject (forced beta fallback)
                 else:
                     proposal = _draw_cpz_block(
                         blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
-                        temp_agg, check_explosive, max_it_stable)
+                        temp_agg, check_explosive, max_it_stable,
+                        stats=stab_backward)
                 proposed_out = _cpz_block_output(
                     proposal["Y_new"], blocks[_m], var_of_interest,
                     idx_voi_m, idx_voi_q)
@@ -729,6 +768,27 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
         (c / t if t > 0 else float("nan"))
         for c, t in zip(mh_accept_counts, mh_total_counts)
     ]
+
+    self.stability_proposals = stab_forward["proposals"]
+    self.stability_rejected = stab_forward["rejected"]
+    self.stability_rejection_share = (
+        stab_forward["rejected"] / stab_forward["proposals"]
+        if stab_forward["proposals"] > 0 else float("nan"))
+    self.stability_proposals_backward = stab_backward["proposals"]
+    self.stability_rejected_backward = stab_backward["rejected"]
+    self.stability_rejection_share_backward = (
+        stab_backward["rejected"] / stab_backward["proposals"]
+        if stab_backward["proposals"] > 0 else float("nan"))
+    self.stability_forced_mean = stab_forward["forced"]
+    self.stability_forced_mean_backward = stab_backward["forced"]
+    # The SS estimator's explosive_counter counts draws whose attempt budget
+    # ran out; the CPZ analogue is the forced posterior-mean substitution in
+    # the forward sweep, which is the one that reaches stored output. Set
+    # unconditionally so main_mbfvar.py's draws_abandoned field is a number
+    # for CPZ runs too, rather than the empty string its getattr default
+    # produced -- a run that quietly replaced draws with posterior means
+    # looked identical to a clean one.
+    self.explosive_counter = stab_forward["forced"]
 
     # convenience scalars for the last block (mirrors the SS estimator)
     self.Nm = Nm_list[-1]
