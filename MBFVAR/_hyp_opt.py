@@ -323,6 +323,19 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
         
         
     results = tuner.maximize()
+
+    # A search in which every evaluation returned the penalty still reports a
+    # "best" point -- whichever candidate happened to be tried first -- and
+    # would save it as though it were a selection. estim() above scores every
+    # failure at the penalty so the search survives them; this refuses to
+    # report a selection that was never actually found.
+    if not np.isfinite(results["best_objective"]) or results["best_objective"] <= -1e16:
+        raise RuntimeError(
+            "Hyperparameter search found no usable configuration: the best "
+            f"objective is {results['best_objective']}, the penalty value "
+            "returned when an evaluation fails. Every evaluation failed; see "
+            "the lines above for the cause. No hyperparameters have been saved.")
+
     best_params = results["best_params"]
     if save == True:
         with open(name, 'w') as f:
