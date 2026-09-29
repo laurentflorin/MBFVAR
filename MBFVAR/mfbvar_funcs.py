@@ -510,29 +510,58 @@ def prior_pdf(hyp,YY,spec,PHI,SIG):
         log2pi     = np.log(2 * np.pi)
         return -0.5 * (rank * log2pi + maha + logdet)
 
+# Points just above one at which the characteristic polynomial is screened.
+_EXPLOSIVE_SCREEN_GRID = 1.0 + np.concatenate(([1e-7], np.geomspace(1e-5, 1.0, 40)))
+
+
+def _companion(Phi, n, p):
+    companion_matrix = np.zeros((n * p, n * p))
+    companion_matrix[:n, :] = Phi[:n*p, :].T
+    if p > 1:
+        companion_matrix[n:, :-n] = np.eye(n * (p - 1))
+    return companion_matrix
+
+
+def _is_explosive_eig(Phi, n, p):
+    """Reference check: any eigenvalue of the companion matrix outside the unit circle."""
+    eigenvalues = eig(_companion(Phi, n, p))[0]
+    return np.any(np.abs(eigenvalues) > 1)
+
+
 def is_explosive(Phi, n, p):
     """
-    Given Phi checks wether the VAR is explosive
+    Given Phi checks wether the VAR is explosive, i.e. whether the companion
+    matrix has an eigenvalue with modulus above one.
+
+    The Gibbs samplers call this for every candidate coefficient draw, and for
+    VARs in levels almost every candidate is explosive by a hair (a real root
+    of about 1.001), so the check dominates the run time. It therefore first
+    evaluates the characteristic polynomial of the companion matrix,
+    f(x) = det(x^p I - x^(p-1) A_1 - ... - A_p), on a grid of points just above
+    one; f is positive at infinity, so a sign change certifies a real root
+    above one and the draw is explosive. Draws without a sign change (stable
+    ones, or explosive through complex roots or an even number of real roots)
+    get the full eigenvalue computation, so the decision is that of the
+    eigenvalue check (``_is_explosive_eig``).
+
     Parameters
     ----------
-    Phi : TYPE
-        DESCRIPTION.
-    n : TYPE
-        DESCRIPTION.
-    p : TYPE
-        DESCRIPTION.
-    
+    Phi : ndarray of shape (n*p + nex, n)
+        VAR coefficients, lags stacked by lag, exogenous terms last.
+    n : int
+        number of variables.
+    p : int
+        number of lags.
 
     Returns
     -------
     Boolean.
     """
-    # Create the companion matrix
-    companion_matrix = np.zeros((n * p, n * p))
-    companion_matrix[:n, :] = Phi[:n*p, :].T
-    if p > 1:
-        companion_matrix[n:, :-n] = np.eye(n * (p - 1))
-    # Calculate the eigenvalues of the companion matrix
-    eigenvalues = eig(companion_matrix)[0]
-    # Check if any eigenvalue's absolute value is greater than 1
+    A = np.asarray(Phi[:n*p, :], dtype=float).reshape(p, n, n).transpose(0, 2, 1)
+    powers = _EXPLOSIVE_SCREEN_GRID[:, None] ** np.arange(p - 1, -1, -1)[None, :]
+    M = (_EXPLOSIVE_SCREEN_GRID ** p)[:, None, None] * np.eye(n) - np.einsum("gi,iab->gab", powers, A)
+    signs = np.append(np.sign(np.linalg.det(M)), 1.0)
+    if np.any(signs[:-1] * signs[1:] < 0):
+        return True
+    eigenvalues = sp.linalg.eigvals(_companion(Phi, n, p), check_finite=False, overwrite_a=True)
     return np.any(np.abs(eigenvalues) > 1)
