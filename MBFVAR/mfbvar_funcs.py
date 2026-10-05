@@ -27,7 +27,48 @@ import itertools
 from .pseudo_inverse.pseudo_inverse import calculate_pseudo_inverse
 
 
-def varprior(nv,nlags, nex, hyp, premom):
+def prior_mean_vector(prior_mean, nv):
+    """Per-variable prior mean of the own first lag, as a float vector.
+
+    ``None`` is the Schorfheide-Song default: every variable centred on a
+    random walk (1), which suits levels and year-on-year growth rates. For
+    period-on-period growth rates the usual centring is white noise (0), with
+    persistent series such as interest rates kept at 1 (Banbura, Giannone and
+    Reichlin, 2010).
+    """
+    if prior_mean is None:
+        return np.ones(nv)
+    delta = np.asarray(prior_mean, dtype=float).ravel()
+    if delta.shape != (nv,):
+        raise ValueError(f"prior_mean has {delta.size} entries for {nv} variables")
+    if not np.all(np.isfinite(delta)):
+        raise ValueError("prior_mean must be finite")
+    return delta
+
+
+def resolve_prior_mean_blocks(prior_mean, varlist_list):
+    """``prior_mean`` as one vector per block, in each block's variable order.
+
+    ``None`` stays ``None`` (the random-walk prior, built exactly as before).
+    A mapping from variable name to prior mean applies to every block in
+    which the variable appears; unnamed variables keep 1. A name that is in
+    no block is refused, since a misspelt name would otherwise leave that
+    series on a random walk.
+    """
+    if prior_mean is None:
+        return None
+    blocks = [[str(v) for v in list(vl)] for vl in varlist_list]
+    if not isinstance(prior_mean, dict):
+        raise TypeError("MBFVAR takes prior_mean as a dict from variable name to "
+                        "prior mean, since the blocks order their variables differently")
+    unknown = sorted(set(map(str, prior_mean)) - set().union(*blocks))
+    if unknown:
+        raise ValueError(f"prior_mean names variables the model does not have: {unknown}")
+    return [prior_mean_vector([float(prior_mean.get(n, 1.0)) for n in names], len(names))
+            for names in blocks]
+
+
+def varprior(nv,nlags, nex, hyp, premom, prior_mean=None):
     """
     
 
@@ -62,8 +103,11 @@ def varprior(nv,nlags, nex, hyp, premom):
     xdu = np.zeros((int(dsize),int(nv*nlags+nex)))
     
     # dummies for the coefficients of the first lag
+    # first-lag dummies: prior mean delta_i on the own first lag
+    # (1 = random walk, the default; 0 = white noise)
+    delta = prior_mean_vector(prior_mean, nv)
     sig = np.diag(premom[:,1])
-    ydu[range(nv),:] = lambda1*sig
+    ydu[range(nv),:] = lambda1*np.diag(premom[:,1]*delta)
     xdu[:nv,:sig.shape[1]] = lambda1*sig
     breakss[0] = nv
     
@@ -91,7 +135,10 @@ def varprior(nv,nlags, nex, hyp, premom):
     breakss[3] = breakss[2,0]+1
     
     # dummies for the covariance matrix of coefficients of different lags
-    mumean = np.diag(lambda5*premom[:,0])
+    # sum-of-coefficients dummies, scaled by delta on both sides as in
+    # Banbura, Giannone and Reichlin (2010): for a variable centred on white
+    # noise (delta_i = 0) the unit-root restriction they encode drops out
+    mumean = np.diag(lambda5*premom[:,0]*delta)
     ydu[int(breakss[3,0]):int(breakss[3,0])+nv,:] = mumean
     if np.kron(np.ones((1,nlags)),mumean).shape[0] > 1:
         xdu[int(breakss[3,0]):int(breakss[3,0])+nv,:] = np.hstack((np.squeeze(np.kron(np.ones((1,nlags)),mumean)), np.zeros((nv,nex))))
@@ -102,7 +149,7 @@ def varprior(nv,nlags, nex, hyp, premom):
     return ydu, xdu
 
     
-def prior_init(hyp,YY,spec):
+def prior_init(hyp,YY,spec, prior_mean=None):
     """
     
 
@@ -138,7 +185,7 @@ def prior_init(hyp,YY,spec):
 
 
     #Generate matrices with dummy observations
-    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom)
+    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom, prior_mean=prior_mean)
     
     inv_x = sp.linalg.pinvh(XXdum.T@XXdum)
     
@@ -263,7 +310,7 @@ def _filter_valid_var_rows(YYact, XXact):
     return YYact_f, XXact_f, valid
 
 
-def mdd_(hyp, YY, spec):
+def mdd_(hyp, YY, spec, prior_mean=None):
     """
 
     Parameters
@@ -302,7 +349,7 @@ def mdd_(hyp, YY, spec):
 
     # Create Matrices with dummy observations
 
-    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom)
+    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom, prior_mean=prior_mean)
 
     # Actual observations
     YYact = YY[T0:T0+nobs, :]
@@ -366,7 +413,7 @@ def mdd_(hyp, YY, spec):
     return mdd, YYact, YYdum, XXact, XXdum
             
 
-def calc_yyact(hyp, YY, spec, premom=None):
+def calc_yyact(hyp, YY, spec, premom=None, prior_mean=None):
     """
 
     Parameters
@@ -412,7 +459,7 @@ def calc_yyact(hyp, YY, spec, premom=None):
 
     # Create Matrices with dummy observations
 
-    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom)
+    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom, prior_mean=prior_mean)
 
     # Actual observations
     YYact = YY[T0:T0+nobs, :]
@@ -430,7 +477,7 @@ def calc_yyact(hyp, YY, spec, premom=None):
 
             
             
-def prior_pdf(hyp,YY,spec,PHI,SIG):
+def prior_pdf(hyp,YY,spec,PHI,SIG, prior_mean=None):
     """
     
 
@@ -470,7 +517,7 @@ def prior_pdf(hyp,YY,spec,PHI,SIG):
     premom  =   np.hstack((ybar, sbar))
     
     #generate matrices with dummy observations
-    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom)
+    YYdum, XXdum = varprior(nv, nlags_, nex_, hyp, premom, prior_mean=prior_mean)
     n = YYdum.shape[1]
     
     

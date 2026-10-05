@@ -401,7 +401,7 @@ def build_completed_data(Ym, At_draw, AT_draw, Nm, Nq):
 
 
 def draw_params_block(hyp_m, YY, spec, check_explosive, max_it_stable,
-                      premom=None):
+                      premom=None, prior_mean=None):
     """One ``K_theta`` update: joint draw of ``(sigma, Phi)`` from the
     NIW-type full conditional given completed data ``YY`` (inverse-Wishart
     marginal for sigma, conditional normal for Phi), truncated by the
@@ -412,7 +412,8 @@ def draw_params_block(hyp_m, YY, spec, check_explosive, max_it_stable,
     regression or explosive-cap exhaustion), with the stability counters
     still reported.
     """
-    YYact, YYdum, XXact, XXdum = calc_yyact(hyp_m, YY, spec, premom=premom)
+    YYact, YYdum, XXact, XXdum = calc_yyact(hyp_m, YY, spec, premom=premom,
+                                            prior_mean=prior_mean)
     Tdummy = YYdum.shape[0]
     Tobs = YYact.shape[0]
     if Tobs == 0:
@@ -468,7 +469,8 @@ def palindromic_proposal_ss(Phi_cur, sigma_cur, hyp_m, nlags_m, nex,
                             At_init, Pt_init, Zm, Ym, Yq, YDATA, index_NY,
                             nobs, Tnobs, Tnew, T0, freq_ratio,
                             Nm, Nq, nv, p, temp_agg,
-                            check_explosive, max_it_stable, premom=None):
+                            check_explosive, max_it_stable, premom=None,
+                            prior_mean=None):
     """The reversible MwG proposal ``K_s K_theta K_s`` for one SS block.
 
     1. ``s'  ~ p(states | theta_cur, data)``   (filters run under theta_cur)
@@ -496,7 +498,8 @@ def palindromic_proposal_ss(Phi_cur, sigma_cur, hyp_m, nlags_m, nex,
     YY1 = build_completed_data(Ym, At1, AT1, Nm, Nq)
     spec = np.hstack((nlags_m, T0, nex, nv, np.shape(YY1)[0] - T0))
     Phi_p, sigma_p, _, n_prop, n_rej = draw_params_block(
-        hyp_m, YY1, spec, check_explosive, max_it_stable, premom=premom)
+        hyp_m, YY1, spec, check_explosive, max_it_stable, premom=premom,
+        prior_mean=prior_mean)
     out["stab_proposals"] += n_prop
     out["stab_rejected"] += n_rej
     if Phi_p is None:
@@ -508,7 +511,7 @@ def palindromic_proposal_ss(Phi_cur, sigma_cur, hyp_m, nlags_m, nex,
         nobs, Tnobs, Tnew, T0, freq_ratio, Nm, Nq, nv, p, temp_agg)
 
     YY2 = build_completed_data(Ym, At2, AT2, Nm, Nq)
-    YYact2, _, _, _ = calc_yyact(hyp_m, YY2, spec, premom=premom)
+    YYact2, _, _, _ = calc_yyact(hyp_m, YY2, spec, premom=premom, prior_mean=prior_mean)
 
     out.update(Phi=Phi_p, sigma=sigma_p, At_draw=At2, AT_draw=AT2,
                Pmean=Pmean2, YYact=YYact2)

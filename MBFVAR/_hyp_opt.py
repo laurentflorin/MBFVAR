@@ -195,7 +195,7 @@ def update_hyperparameters(self, mbfvar_data, pbounds, init_points, n_iter, nsim
     return hyp
 
 
-def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', save = False, name = "hyp.txt", seed = 0):
+def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_iter, nsim, njobs, var_of_interest = None, temp_agg = 'mean', save = False, name = "hyp.txt", seed = 0, prior_mean = None):
     
     '''
     This method uses bayesian optimization to find the hyperparameters with the highest mdd\n
@@ -270,7 +270,8 @@ def update_hyperparameters_mango(self, mbfvar_data, param_space, init_points, n_
         try:
             # Call the main fit() function with return_mdd=True
             mdd = self.fit(mbfvar_data, hyp_list, var_of_interest=var_of_interest,
-                          temp_agg=temp_agg, return_mdd=True, check_explosive=False, seed=seed)
+                          temp_agg=temp_agg, return_mdd=True, check_explosive=False, seed=seed,
+                          prior_mean=prior_mean)
         except Exception:
             # Any numerical failure (IndexError, LinAlgError, etc.) for a bad
             # hyperparameter combination must return a penalty so joblib does

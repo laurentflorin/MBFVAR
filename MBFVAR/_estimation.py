@@ -42,7 +42,7 @@ import copy
 #from MBFVAR.pseudo_inverse.pseudo_inverse import calculate_pseudo_inverse
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
-from .mfbvar_funcs import calc_yyact, is_explosive, mdd_
+from .mfbvar_funcs import calc_yyact, is_explosive, mdd_, resolve_prior_mean_blocks
 from ._mh_proposals import (palindromic_proposal_ss, build_block_matrices,
                             lf_marginal_loglik_block)
 # for hyperparameter tuning
@@ -177,7 +177,7 @@ def _kalman_filter_loglik_block(
     return ll
 
 
-def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None, mh_acceptance = 'joint'):
+def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None, mh_acceptance = 'joint', prior_mean = None):
 
     '''
     Estimates the model using the model parameter specified in the initialization. \n
@@ -235,6 +235,14 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         state-independent NIW prior -- required by the Geweke
         getting-it-right test.  Not supported together with
         ``return_mdd=True``.
+    prior_mean : dict or None
+        Schorfheide-Song only: prior mean of each variable's own first lag,
+        by variable name, applied in every block where the variable appears.
+        None (default) centres every variable on a random walk, the original
+        prior. For period-on-period growth rates use 0 for the growth series
+        and 1 for persistent ones such as interest rates (Banbura, Giannone
+        and Reichlin, 2010); unnamed variables keep 1. The
+        sum-of-coefficients dummies are scaled by the same values.
     kf_init : str
         ``'adaptive'`` (default, legacy) re-initialises each block's
         balanced Kalman filter at every sweep from the previous sweep's
@@ -277,6 +285,9 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
             and mh_proposal != 'palindromic'):
         raise ValueError("mh_acceptance='conditional' is only implemented "
                          "for mh_proposal='palindromic' (or sampler='cut').")
+    if prior_mean is not None and method == 'chan_poon_zhu':
+        raise ValueError("prior_mean applies to the Schorfheide-Song prior; "
+                         "the Chan-Poon-Zhu prior is already centred at zero")
     if prior_premom is not None and return_mdd:
         raise ValueError("prior_premom is not supported together with return_mdd=True "
                          "(the MDD path computes its own pre-sample moments).")
@@ -286,6 +297,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     self.kf_init = kf_init
     self.mh_acceptance = mh_acceptance
     self._prior_premom = prior_premom
+    # Own-first-lag prior means by variable name; resolved per block below,
+    # once the block variable lists are known. None keeps the random-walk
+    # prior exactly as before.
+    self._prior_mean_spec = prior_mean
     self._init_params = init_params
     if seed is None:
         seed = getattr(self, 'seed', 0)
@@ -339,6 +354,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     input_data_Q =  copy.deepcopy(mbfvar_data.input_data_Q)
     self.input_data_Q = input_data_Q
     varlist_list = copy.deepcopy(mbfvar_data.varlist_list)
+    self._prior_mean = resolve_prior_mean_blocks(self._prior_mean_spec, varlist_list)
     select_list = copy.deepcopy(mbfvar_data.select_list)
     select_c_list = copy.deepcopy(mbfvar_data.select_c_list)
     Nm_list = copy.deepcopy(mbfvar_data.Nm_list)
@@ -912,12 +928,17 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         
             # dummy observations and actual observations
             if return_mdd:
-                mdd_list[m], YYact, YYdum, XXact, XXdum = mdd_(self.hyp[m], YY, spec)
+                mdd_list[m], YYact, YYdum, XXact, XXdum = mdd_(
+                    self.hyp[m], YY, spec,
+                    prior_mean=(self._prior_mean[m]
+                                if self._prior_mean is not None else None))
             else:
                 YYact, YYdum, XXact, XXdum = calc_yyact(
                     self.hyp[m], YY, spec,
                     premom=(self._prior_premom[m]
-                            if self._prior_premom is not None else None))
+                            if self._prior_premom is not None else None),
+                    prior_mean=(self._prior_mean[m]
+                                if self._prior_mean is not None else None))
             
             if (j%self.thining == 0 and m == (len(YMh_list)-1)):
                 # With ragged-edge masking, YYact may be shorter than expected
@@ -1398,6 +1419,8 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         self.temp_agg, check_explosive, max_it_stable,
                         premom=(self._prior_premom[_m]
                                 if self._prior_premom is not None else None),
+                        prior_mean=(self._prior_mean[_m]
+                                    if self._prior_mean is not None else None),
                     )
                     stability_proposals_backward += _prop["stab_proposals"]
                     stability_rejected_backward += _prop["stab_rejected"]
@@ -1700,7 +1723,9 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 _YYact_p, _YYdum_p, _XXact_p, _XXdum_p = calc_yyact(
                     self.hyp[_m], _YY_p, _spec_p,
                     premom=(self._prior_premom[_m]
-                            if self._prior_premom is not None else None)
+                            if self._prior_premom is not None else None),
+                    prior_mean=(self._prior_mean[_m]
+                                if self._prior_mean is not None else None)
                 )
                 _Tdummy_p = _YYdum_p.shape[0]
                 _Tobs_p = _YYact_p.shape[0]
