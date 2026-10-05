@@ -154,8 +154,16 @@ class TestFitWithPriorMean(unittest.TestCase):
     def test_white_noise_centring_changes_the_chain_and_is_recorded(self):
         a, b = self.fit(), self.fit(prior_mean={"m_1": 0, "q_1": 0})
         self.assertFalse(np.array_equal(a.Phip_list[-1], b.Phip_list[-1]))
-        np.testing.assert_array_equal(b._prior_mean[0], [0, 0])        # [m_1, q_1]
-        np.testing.assert_array_equal(b._prior_mean[1], [1, 0, 0])     # [w_1, m_1, q_1]
+        np.testing.assert_array_equal(b.prior_mean_by_block[0], [0, 0])     # [m_1, q_1]
+        np.testing.assert_array_equal(b.prior_mean_by_block[1], [1, 0, 0])  # [w_1, m_1, q_1]
+
+    def test_blocks_narrowed_by_var_of_interest_get_their_own_vector(self):
+        """With var_of_interest the weekly block carries only the variables
+        of interest ([w_1, q_1] here), not every low-frequency series; the
+        paper's production runs pass var_of_interest=['GDPC1']."""
+        b = self.fit(prior_mean={"m_1": 0, "q_1": 0}, var_of_interest=["q_1"])
+        np.testing.assert_array_equal(b.prior_mean_by_block[0], [0, 0])     # [m_1, q_1]
+        np.testing.assert_array_equal(b.prior_mean_by_block[1], [1, 0])     # [w_1, q_1]
 
     def test_refused_on_the_cpz_path(self):
         model = MBFVAR.MixedFrequencyBVAR(12, 0.5, [3, 4], 1)

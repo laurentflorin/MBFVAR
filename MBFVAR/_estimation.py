@@ -42,7 +42,7 @@ import copy
 #from MBFVAR.pseudo_inverse.pseudo_inverse import calculate_pseudo_inverse
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
-from .mfbvar_funcs import calc_yyact, is_explosive, mdd_, resolve_prior_mean_blocks
+from .mfbvar_funcs import calc_yyact, is_explosive, mdd_, prior_mean_vector, resolve_prior_mean_blocks
 from ._mh_proposals import (palindromic_proposal_ss, build_block_matrices,
                             lf_marginal_loglik_block)
 # for hyperparameter tuning
@@ -175,6 +175,20 @@ def _kalman_filter_loglik_block(
                 ll += -0.5 * (logdet + nut @ invert_matrix(Ft) @ nut + k * np.log(2.0 * np.pi))
 
     return ll
+
+
+def _block_prior_mean(self, m):
+    """Own-first-lag prior means of block m, in its variable order, or None
+    for the random-walk prior. Cached; ``self.prior_mean_by_block`` records
+    what each block was given."""
+    spec = getattr(self, "_prior_mean_spec", None)
+    if spec is None:
+        return None
+    if m not in self.prior_mean_by_block:
+        names = self._block_names[m]
+        self.prior_mean_by_block[m] = prior_mean_vector(
+            [float(spec.get(n, 1.0)) for n in names], len(names))
+    return self.prior_mean_by_block[m]
 
 
 def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_it_stable = 1000, return_mdd = False, check_explosive = True, method = 'schorfheide_song', seed = None, sampler = 'exact', mh_proposal = 'palindromic', prior_premom = None, kf_init = 'adaptive', init_params = None, mh_acceptance = 'joint', prior_mean = None):
@@ -354,7 +368,14 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     input_data_Q =  copy.deepcopy(mbfvar_data.input_data_Q)
     self.input_data_Q = input_data_Q
     varlist_list = copy.deepcopy(mbfvar_data.varlist_list)
-    self._prior_mean = resolve_prior_mean_blocks(self._prior_mean_spec, varlist_list)
+    # Own-first-lag prior means are resolved per block from the variables the
+    # block actually carries, which are known only once it is set up: with
+    # var_of_interest the higher blocks take just the low-frequency variables
+    # of interest (the j == 0 set-up below records their names). The names
+    # are validated against all blocks here, before any sampling.
+    resolve_prior_mean_blocks(self._prior_mean_spec, varlist_list)
+    self._block_names = {0: [str(v) for v in varlist_list[0]]}
+    self.prior_mean_by_block = {}
     select_list = copy.deepcopy(mbfvar_data.select_list)
     select_c_list = copy.deepcopy(mbfvar_data.select_c_list)
     Nm_list = copy.deepcopy(mbfvar_data.Nm_list)
@@ -930,15 +951,13 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
             if return_mdd:
                 mdd_list[m], YYact, YYdum, XXact, XXdum = mdd_(
                     self.hyp[m], YY, spec,
-                    prior_mean=(self._prior_mean[m]
-                                if self._prior_mean is not None else None))
+                    prior_mean=_block_prior_mean(self, m))
             else:
                 YYact, YYdum, XXact, XXdum = calc_yyact(
                     self.hyp[m], YY, spec,
                     premom=(self._prior_premom[m]
                             if self._prior_premom is not None else None),
-                    prior_mean=(self._prior_mean[m]
-                                if self._prior_mean is not None else None))
+                    prior_mean=_block_prior_mean(self, m))
             
             if (j%self.thining == 0 and m == (len(YMh_list)-1)):
                 # With ragged-edge masking, YYact may be shorter than expected
@@ -1188,12 +1207,17 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     #YQ0_list.append(YYact)#YQ0_list.append(YYact[:,-Nq_list[m+1]:])
                     if var_of_interest is None:
                         YQ0_list.append(YYact)
+                        _latent_names = list(self._block_names[m])
                     else:
                         idx_vars = np.concatenate((np.array(idx_var_of_interest_m) , (YM_list[m].shape[1]+np.array(idx_var_of_interest))))
                         YQ0_list.append(YYact[:,np.int_(idx_vars)].reshape(-1, len(idx_vars)))
+                        _latent_names = [self._block_names[m][int(i)] for i in idx_vars]
                         #we also need to update nv_list and Nq_lsit
                         nv_list[m + 1] = len(idx_vars) + YM0_list[m+1].shape[1]
                         Nq_list[m + 1] = len(idx_vars)
+                    # block m+1 stacks its observed series before the latent ones
+                    self._block_names[m + 1] = ([str(c) for c in YMX_list[m + 1].columns]
+                                                + _latent_names)
                     YQ_list.append(np.kron(YQ0_list[m+1], np.ones((freq_ratio_list[m+1],1))))#[np.prod(np.array(nlags_list_[:(m+2)])):,:])
                     #Yq_list.append(YQ_list[m+1][T0_list[m+1]:nobs_list[m+1]+T0_list[m+1],:])
                     if YM_list[m].size:
@@ -1419,8 +1443,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         self.temp_agg, check_explosive, max_it_stable,
                         premom=(self._prior_premom[_m]
                                 if self._prior_premom is not None else None),
-                        prior_mean=(self._prior_mean[_m]
-                                    if self._prior_mean is not None else None),
+                        prior_mean=_block_prior_mean(self, _m),
                     )
                     stability_proposals_backward += _prop["stab_proposals"]
                     stability_rejected_backward += _prop["stab_rejected"]
@@ -1724,8 +1747,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     self.hyp[_m], _YY_p, _spec_p,
                     premom=(self._prior_premom[_m]
                             if self._prior_premom is not None else None),
-                    prior_mean=(self._prior_mean[_m]
-                                if self._prior_mean is not None else None)
+                    prior_mean=_block_prior_mean(self, _m)
                 )
                 _Tdummy_p = _YYdum_p.shape[0]
                 _Tobs_p = _YYact_p.shape[0]
