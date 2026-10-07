@@ -46,7 +46,7 @@ from scipy.stats import invwishart
 
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
-from .mfbvar_funcs import calc_yyact, is_explosive
+from .mfbvar_funcs import calc_yyact, is_explosive, smoother_pinv
 
 
 def build_block_matrices(Phi, sigma, Nm, Nq, p, freq_ratio, temp_agg):
@@ -278,7 +278,7 @@ def draw_states_block(Phi, sigma, At_init, Pt_init,
         BPtt = BPt_mat[Tnobs-(i+2), :].reshape((kn, kn), order="F")
         BPhat = PHIF @ BPtt @ PHIF.T + SIGF
         BPhat = 0.5 * (BPhat + BPhat.T)
-        inv_BPhat = invert_matrix(BPhat)
+        inv_BPhat = smoother_pinv(BPhat)
         Bnut = AT_draw[-(i+1), :] - PHIF @ BAtt - CONF
         Amean = BAtt + (BPtt @ PHIF.T) @ inv_BPhat @ Bnut
         Pmean_unb = BPtt - (BPtt @ PHIF.T) @ inv_BPhat @ np.transpose(BPtt @ PHIF.T)
@@ -298,7 +298,7 @@ def draw_states_block(Phi, sigma, At_init, Pt_init,
         Ptt = Pt_mat[nobs-(i+2), :].reshape((ns, ns), order="F")
         Phat = GAMMAs @ Ptt @ GAMMAs.T + GAMMAu @ sig_qq @ GAMMAu.T
         Phat = 0.5 * (Phat + Phat.T)
-        inv_Phat = invert_matrix(Phat)
+        inv_Phat = smoother_pinv(Phat)
         nut = (At_draw[nobs-(i+1), :] - GAMMAs @ Att
                - GAMMAz @ Zm[nobs-1-(i+1)] - GAMMAc[:, 0])
         temp = Ptt @ GAMMAs.T

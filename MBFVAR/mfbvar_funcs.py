@@ -575,6 +575,54 @@ def _is_explosive_eig(Phi, n, p):
     return np.any(np.abs(eigenvalues) > 1)
 
 
+def smoother_pinv(P, rcond=1e-10):
+    """
+    Inverse of the one-step-ahead state covariance in the backward
+    (Carter-Kohn) step of the simulation smoothers (MBFVAR 0.9.4).
+
+    That covariance is singular by construction: the state stacks lagged
+    copies of the latent series, and the temporal-aggregation constraints are
+    observed without error, so the filtered covariance loses rank at every
+    low-frequency observation. The backward step therefore needs a
+    generalised inverse. With the Moore-Penrose inverse the conditional mean
+    and covariance are exact, because the state being conditioned on lies in
+    the covariance's range.
+
+    Before 0.9.4 the smoothers called ``invert_matrix``, whose full-pivot LU
+    test accepts numerically singular matrices (round-off leaves their zero
+    eigenvalues at up to 1e-13 of the largest) and returns inverses with
+    entries of up to 1e19. The amplified
+    round-off made the smoothed covariance indefinite and, at some parameter
+    values, blew the latent paths up to 1e40 and beyond; every coefficient
+    draw given such paths is explosive, so the stationarity screen rejected
+    them all, the parameters could no longer move, and the chain stayed
+    there (the SS growth-rate runs that ended with no valid draws).
+
+    Eigenvalues below ``rcond`` times the largest are treated as zero. In the
+    paper's year-on-year and growth-rate fits the zero eigenvalues come out
+    between 1e-20 and 1e-13 of the largest and the genuine ones at 1e-3 and
+    above, with none in between, so any ``rcond`` in that gap gives the same
+    inverse.
+
+    Parameters
+    ----------
+    P : ndarray of shape (k, k)
+        symmetric positive semi-definite covariance.
+    rcond : float
+        relative eigenvalue cut-off.
+
+    Returns
+    -------
+    ndarray of shape (k, k)
+        the Moore-Penrose inverse of the symmetrised ``P``.
+    """
+    P = 0.5 * (P + P.T)
+    w, V = np.linalg.eigh(P)
+    keep = w > rcond * w[-1]
+    Vk = V[:, keep]
+    return (Vk / w[keep]) @ Vk.T
+
+
 def is_explosive(Phi, n, p):
     """
     Given Phi checks wether the VAR is explosive, i.e. whether the companion

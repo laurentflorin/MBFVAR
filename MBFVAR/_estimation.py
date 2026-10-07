@@ -42,7 +42,8 @@ import copy
 #from MBFVAR.pseudo_inverse.pseudo_inverse import calculate_pseudo_inverse
 from .cholcov.cholcov_module import cholcovOrEigendecomp
 from .inverse.matrix_inversion import invert_matrix
-from .mfbvar_funcs import calc_yyact, is_explosive, mdd_, prior_mean_vector, resolve_prior_mean_blocks
+from .mfbvar_funcs import (calc_yyact, is_explosive, mdd_, prior_mean_vector,
+                          resolve_prior_mean_blocks, smoother_pinv)
 from ._mh_proposals import (palindromic_proposal_ss, build_block_matrices,
                             lf_marginal_loglik_block)
 # for hyperparameter tuning
@@ -870,7 +871,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 BPhat = PHIF @ BPtt @ PHIF.T + SIGF
                 BPhat = 0.5*(BPhat+BPhat.T)
                 
-                inv_BPhat = invert_matrix(BPhat)
+                inv_BPhat = smoother_pinv(BPhat)
                 
                 Bnut = AT_draw[-(i+1),:]- PHIF @ BAtt - CONF
                 
@@ -905,7 +906,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                 
                 Phat = 0.5*(Phat + Phat.T)
                 
-                inv_Phat = invert_matrix(Phat)
+                inv_Phat = smoother_pinv(Phat)
                 
                 nut = At_draw[nobs_list[m]-(i+1), :] - GAMMAs_list[m] @ Att - GAMMAz_list[m] @ Zm_list[m][nobs_list[m]-1-(i+1)] - GAMMAc_list[m][:,0]
 
@@ -1674,7 +1675,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     )
                     _BPhat_p = _PHIF_m @ _BPtt_p @ _PHIF_m.T + _SIGF_m
                     _BPhat_p = 0.5 * (_BPhat_p + _BPhat_p.T)
-                    _inv_BPhat_p = invert_matrix(_BPhat_p)
+                    _inv_BPhat_p = smoother_pinv(_BPhat_p)
                     _Bnut_p = _AT_draw_p[-(_i+1), :] - _PHIF_m @ _BAtt_p - _CONF_m
                     _Amean_p = _BAtt_p + (_BPtt_p @ _PHIF_m.T) @ _inv_BPhat_p @ _Bnut_p
                     _Pmean_unb_p = (
@@ -1707,7 +1708,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         + GAMMAu_list[_m] @ sig_qq_list[_m] @ GAMMAu_list[_m].T
                     )
                     _Phat_p = 0.5 * (_Phat_p + _Phat_p.T)
-                    _inv_Phat_p = invert_matrix(_Phat_p)
+                    _inv_Phat_p = smoother_pinv(_Phat_p)
                     _nut_p = (
                         _At_draw_p[nobs_list[_m]-(_i+1), :]
                         - GAMMAs_list[_m] @ _Att_p
