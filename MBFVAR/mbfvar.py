@@ -175,7 +175,7 @@ class MixedFrequencyBVAR:
         self.seed = seed
         
     # Imported methods
-    from ._estimation import fit, forecast, aggregate, scenario_forecast
+    from ._estimation import fit, forecast, forecast_block, aggregate, scenario_forecast
     from ._plots import fanchart, mean_plot, scenario_plot, compare_models
     from ._save import to_excel, save
     from ._hyp_opt import update_hyperparameters, update_hyperparameters_mango, update_hyperparameters_mango_rmse, update_hyperparameters_mango_rmse_random

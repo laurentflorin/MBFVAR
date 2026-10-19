@@ -45,7 +45,7 @@ from .inverse.matrix_inversion import invert_matrix
 from .mfbvar_funcs import (calc_yyact, is_explosive, mdd_, prior_mean_vector,
                           resolve_prior_mean_blocks, smoother_pinv)
 from ._mh_proposals import (palindromic_proposal_ss, build_block_matrices,
-                            lf_marginal_loglik_block)
+                            build_completed_data, lf_marginal_loglik_block)
 # for hyperparameter tuning
 
 
@@ -176,6 +176,25 @@ def _kalman_filter_loglik_block(
                 ll += -0.5 * (logdet + nut @ invert_matrix(Ft) @ nut + k * np.log(2.0 * np.pi))
 
     return ll
+
+
+def _store_block_end(block_end, m, j_temp, YY, p, n_store):
+    """Keep the end of block m's completed data in draw j_temp: its last row
+    and that row's lag regressors [y_{T-1}, ..., y_{T-p}, 1], the layout of
+    calc_yyact's XXact. forecast_block() iterates the block's VAR forward
+    from there (MBFVAR 0.9.5); the forward simulation of the last block
+    keeps using YYactsim_list/XXactsim_list as before."""
+    YY = np.asarray(YY, dtype=float)
+    nv = YY.shape[1]
+    if m not in block_end:
+        block_end[m] = (np.full((n_store, nv), np.nan),
+                        np.full((n_store, nv * p + 1), np.nan))
+    yy, xx = block_end[m]
+    if YY.shape[0] < p + 1:
+        return
+    yy[j_temp] = YY[-1]
+    xx[j_temp, :-1] = YY[-2:-p - 2:-1].ravel()
+    xx[j_temp, -1] = 1.0
 
 
 def _block_prior_mean(self, m):
@@ -437,7 +456,10 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
     lstate_list    = deque()
     YYactsim_list  = deque()
     XXactsim_list  = deque()
-    
+    # end-of-sample data of the lower blocks, per stored draw (forecast_block)
+    block_end      = {}
+    n_store        = math.ceil(self.nsim/self.thining)
+
     At_mat_list    = deque()
     Pt_mat_list    = deque()
     Atildemat_list = deque()
@@ -959,7 +981,11 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                     premom=(self._prior_premom[m]
                             if self._prior_premom is not None else None),
                     prior_mean=_block_prior_mean(self, m))
-            
+
+            if (j%self.thining == 0 and m < (len(YMh_list)-1)):
+                _store_block_end(block_end, m, int(j/self.thining), YY,
+                                 int(p_list[m]), n_store)
+
             if (j%self.thining == 0 and m == (len(YMh_list)-1)):
                 # With ragged-edge masking, YYact may be shorter than expected
                 tail_len = min(freq_ratio_list[m] + 1, YYact.shape[0])
@@ -1546,6 +1572,12 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                             Sigmap_list[_m][_jt, :, :] = _prop["sigma"]
                             Phip_list[_m][_jt, :, :] = _prop["Phi"]
                             Cons_list[_m][_jt, :] = _prop["Phi"][-1, :]
+                            _store_block_end(
+                                block_end, _m, _jt,
+                                build_completed_data(Ym_list[_m], _prop["At_draw"],
+                                                     _prop["AT_draw"], Nm_list[_m],
+                                                     Nq_list[_m]),
+                                int(p_list[_m]), n_store)
 
                         YQ_list[_m+1] = _YQ_prop
                         Yq_list[_m+1] = _Yq_prop
@@ -1947,6 +1979,7 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
                         Sigmap_list[_m][_jt, :, :] = _sigma_prop
                         Phip_list[_m][_jt, :, :] = _Phi_prop
                         Cons_list[_m][_jt, :] = _Phi_prop[-1, :]
+                        _store_block_end(block_end, _m, _jt, _YY_p, _p_m, n_store)
 
                     # Update downstream input for block _m+1 (takes effect next sweep)
                     YQ_list[_m+1] = _YQ_prop
@@ -1979,6 +2012,12 @@ def fit(self, mbfvar_data, hyp, var_of_interest = None, temp_agg = 'mean', max_i
         self.T0 = T0_list[-1]
         self.Tnew = Tnew_list[-1]
     
+    # every block's full variable list and transformation, before the
+    # var_of_interest restriction below (forecast_block reports all of them)
+    self.block_varlist_full = [np.asarray(v).copy() for v in varlist_list]
+    self.block_select_full = [np.asarray(s).copy() for s in select_list]
+    self.block_end = block_end
+
     if not(var_of_interest is None):
         #update varlist and select_list
         for m in range(len(frequencies)-1):
@@ -2087,6 +2126,99 @@ def forecast(self, H, conditionals = None, seed = None):
         from ._estimation_cpz import forecast_cpz
         return forecast_cpz(self, H, conditionals=conditionals)
     return _forecast_impl(self, H, conditionals=conditionals)
+
+
+def forecast_block(self, m, H, seed = None):
+
+    '''
+    Forecast a lower block at its own frequency (MBFVAR 0.9.5).
+
+    With ``var_of_interest`` set, only those low-frequency variables are
+    passed on to the higher blocks, so the other variables of block m (e.g.
+    the monthly indicators of the quarterly-monthly block) never reach the
+    last block and :meth:`forecast` says nothing about them. This method
+    iterates block m's VAR forward from the end of its completed sample,
+    draw by draw, exactly as :meth:`forecast` does for the last block.
+
+    Parameters
+    ----------
+    m : int
+        Block index, 0 <= m < number of blocks - 1.
+    H : int
+        Horizon in block m's high frequency (months for block 0 of a
+        Q-M-W model), counted from the period after the block's last row.
+    seed : int or None
+        Seed of a private generator (default: the model seed). The global
+        NumPy stream that :meth:`forecast` uses is not touched, so calling
+        this method before or after :meth:`forecast` leaves the last
+        block's forecasts unchanged.
+
+    Returns
+    -------
+    dict
+        ``draws``: (valid draws, H, nv_m) in model units; ``index``: the
+        forecast dates; ``names``: block m's variables; ``mean``, ``median``,
+        ``q05``, ``q16``, ``q84``, ``q95``: DataFrames in the data's units
+        (draw-by-draw back-transformation, as in :meth:`forecast`).
+        Also stored as ``self.block_forecasts[m]``.
+    '''
+    if not 0 <= m < len(self.nv_list) - 1:
+        raise ValueError(f"forecast_block covers blocks 0..{len(self.nv_list) - 2}; "
+                         "the last block is forecast by forecast()")
+    if m not in getattr(self, "block_end", {}):
+        raise ValueError("this fit holds no end-of-sample states for block "
+                         f"{m}; refit with MBFVAR >= 0.9.5")
+    YYend, XXend = self.block_end[m]
+    nv = int(self.nv_list[m])
+    names = [str(v) for v in self.block_varlist_full[m]]
+    select = np.asarray(self.block_select_full[m])
+    if len(names) != nv or len(select) != nv:
+        raise ValueError(f"block {m}: {len(names)} names and {len(select)} "
+                         f"transformations for {nv} variables")
+    if seed is None:
+        seed = getattr(self, "seed", 0)
+    rng = np.random.default_rng([int(seed), 95, int(m)])
+
+    draws = np.full((len(self.valid_draws), int(H), nv), np.nan)
+    for idx, jj in enumerate(self.valid_draws):
+        y, x = YYend[jj], XXend[jj]
+        if not (np.all(np.isfinite(y)) and np.all(np.isfinite(x))):
+            continue
+        phi = self.Phip_list[m][jj]
+        sig = self.Sigmap_list[m][jj]
+        try:
+            chol = np.linalg.cholesky(sig)
+        except np.linalg.LinAlgError:
+            chol = cholcovOrEigendecomp(sig)
+        for h in range(int(H)):
+            x = np.concatenate((y, x[:-nv-1], [1.0]))
+            y = x @ phi + chol @ rng.standard_normal(nv)
+            draws[idx, h] = y
+
+    freq = self.frequencies[m+1]
+    last = pd.Timestamp(self.index_list[m][-1])
+    if freq == 'M':
+        index = pd.date_range(start=last + MonthBegin(), periods=int(H), freq='MS')
+    elif freq == 'Q':
+        index = pd.date_range(start=last + QuarterBegin(), periods=int(H), freq='QS')
+    else:
+        raise NotImplementedError(f"forecast_block: block frequency {freq!r}")
+
+    levels = draws.copy()
+    levels[:, :, select == 0] = np.exp(levels[:, :, select == 0])
+    levels[:, :, select == 1] = 100 * levels[:, :, select == 1]
+    frame = lambda a: pd.DataFrame(a, index=index, columns=names)
+    out = dict(draws=draws, index=index, names=names,
+               mean=frame(np.nanmean(levels, axis=0)),
+               median=frame(np.nanquantile(levels, 0.5, axis=0)),
+               q05=frame(np.nanquantile(levels, 0.05, axis=0)),
+               q16=frame(np.nanquantile(levels, 0.16, axis=0)),
+               q84=frame(np.nanquantile(levels, 0.84, axis=0)),
+               q95=frame(np.nanquantile(levels, 0.95, axis=0)))
+    if not hasattr(self, "block_forecasts"):
+        self.block_forecasts = {}
+    self.block_forecasts[m] = out
+    return out
 
 
 def _forecast_impl(self, H, conditionals = None):

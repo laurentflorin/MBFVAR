@@ -57,6 +57,7 @@ from scipy.linalg import cholesky, solve_triangular
 from tqdm import tqdm
 
 from .mfbvar_funcs import is_explosive
+from ._estimation import _store_block_end
 from ._cpz_funcs import (
     get_resid_var,
     construct_minnesota,
@@ -602,6 +603,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     lstate_list = [np.zeros((n_store, Nq_L, Tnobs_L))]
     YYactsim_list = [np.full((n_store, r_L + 1, nv_L), np.nan)]
     XXactsim_list = [np.full((n_store, r_L + 1, nv_L * p_L + 1), np.nan)]
+    block_end = {}   # end-of-sample data of the lower blocks (forecast_block)
     valid_draws = []
     mh_accept_counts = [0] * max(M - 1, 0)
     mh_total_counts = [0] * max(M - 1, 0)
@@ -656,6 +658,9 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                         for l in range(1, p + 1):
                             row[(l - 1) * n:l * n] = b["Y_new"][t - l, :]
                         XXactsim_list[0][j_temp, kk, :] = row
+
+            if store and bi < M - 1:
+                _store_block_end(block_end, bi, j_temp, b["Y_new"], p, n_store)
 
             # --- feed the disaggregated series to the next block ---
             if bi < M - 1:
@@ -716,6 +721,9 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                         _store_cpz_block_draw(
                             _m, j_temp, blocks[_m],
                             Phip_list, Sigmap_list, h_list)
+                        _store_block_end(block_end, _m, j_temp,
+                                         blocks[_m]["Y_new"], blocks[_m]["p"],
+                                         n_store)
             except (np.linalg.LinAlgError, ValueError, FloatingPointError):
                 continue
 
@@ -723,6 +731,12 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     # store results under the SAME attribute names the SS path uses so that
     # forecast / aggregate / plots / save keep working unchanged.
     # ------------------------------------------------------------------
+    # every block's full variable list and transformation, before the
+    # var_of_interest restriction below (forecast_block reports all of them)
+    self.block_varlist_full = [np.asarray(v).copy() for v in varlist_list]
+    self.block_select_full = [np.asarray(s).copy() for s in select_list]
+    self.block_end = block_end
+
     if var_of_interest is not None:
         # mirror the SS estimator: restrict varlist/select to the variables of
         # interest so the last block's forecast/aggregate widths stay consistent
