@@ -166,8 +166,14 @@ def _record_stability(stats, proposals, rejected, forced):
 
 
 def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
-                    check_explosive, max_it_stable, stats=None):
-    """Draw one CPZ bi-frequency block without mutating persistent state."""
+                    check_explosive, max_it_stable, stats=None, force_csv=False):
+    """Draw one CPZ bi-frequency block without mutating persistent state.
+
+    The volatility path is drawn by the exact accept-reject
+    Metropolis-Hastings step (Chan 2020, Online Appendix A); ``force_csv``
+    forces its acceptance, which the forward pass does only on the first
+    sweep, where h starts at zero. Up to MBFVAR 0.9.6 the forward pass forced
+    it on every sweep, as the replication driver MFVAR.m does."""
     n, p, r, Nm, Nq = b["nv"], b["p"], b["r"], b["Nm"], b["Nq"]
     Tstar, nQ = b["Tstar"], b["nQ"]
     Y_con = _constraint_targets(lf_obs, b["con_index"])
@@ -206,7 +212,7 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
 
     R = cholesky(invSig, lower=False)
     s2 = np.sum((err @ R) ** 2, axis=1)
-    h_new, _ = sample_CSV(s2, b["rho"], b["sigh2"], b["h"], n, True)
+    h_new, csv_accept = sample_CSV(s2, b["rho"], b["sigh2"], b["h"], n, force_csv)
     eh = h_new[1:] - b["rho"] * h_new[:-1]
     sigh2 = 1.0 / np.random.gamma(
         10 + Y_reg.shape[0] / 2.0,
@@ -229,6 +235,7 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
         Sigma=Sigma,
         invVbeta=invVbeta,
         forced=forced,
+        csv_accept=csv_accept,
     )
 
 
@@ -605,6 +612,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     XXactsim_list = [np.full((n_store, r_L + 1, nv_L * p_L + 1), np.nan)]
     block_end = {}   # end-of-sample data of the lower blocks (forecast_block)
     valid_draws = []
+    csv_accepts = [0] * M   # forward-pass volatility-step acceptances
     mh_accept_counts = [0] * max(M - 1, 0)
     mh_total_counts = [0] * max(M - 1, 0)
     # The CPZ path DOES screen explosive draws (unlike SBFVAR's CPZ path,
@@ -639,8 +647,10 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
 
             draw = _draw_cpz_block(
                 b, lf_obs, self.hyp[bi], theta_defaults, temp_agg,
-                check_explosive, max_it_stable, stats=stab_forward)
+                check_explosive, max_it_stable, stats=stab_forward,
+                force_csv=(j == 0))
             _apply_cpz_block_draw(b, draw)
+            csv_accepts[bi] += draw["csv_accept"]
 
             if store:
                 _store_cpz_block_draw(bi, j_temp, b, Phip_list, Sigmap_list, h_list)
@@ -777,6 +787,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
     self.var_of_interest = var_of_interest
     self.valid_draws = [d for d in valid_draws if d >= self.nburn / self.thining]
     self.mh_accept_counts = mh_accept_counts
+    self.csv_accept_rates = [c / max(self.nsim, 1) for c in csv_accepts]
     self.mh_total_counts = mh_total_counts
     self.mh_accept_rates = [
         (c / t if t > 0 else float("nan"))

@@ -35,6 +35,11 @@ from scipy.sparse.linalg import spsolve
 from scipy.linalg import cholesky, cholesky_banded, solve_triangular
 from scipy.linalg.lapack import dtbtrs
 
+# The CPZ fit runs the exact accept-reject Metropolis-Hastings volatility step
+# (forced acceptance only on the forward pass's first sweep) since MBFVAR
+# 0.9.7; entry points check for this flag.
+CSV_EXACT = True
+
 
 # Large precision weight used to enforce the intertemporal-aggregation
 # equality constraints as a hard (near-exact) restriction in the latent-state
@@ -155,7 +160,7 @@ def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0),
     return 1.0 / var_diag
 
 
-def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
+def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=False, tol=1e-3):
     """Sample the common stochastic-volatility log-variance path ``h``.
 
     Faithful port of ``sample_CSV.m`` -- an accept/reject Metropolis-Hastings
@@ -175,8 +180,10 @@ def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
     n : int
         Cross-sectional dimension (number of variables in the block).
     is_forced_accept : bool, optional
-        If True the proposal is always accepted (mirrors the ``is_ForcedAccept``
-        argument used by the reference driver).
+        If True the proposal is always accepted, skipping the MH correction.
+        Default False, the exact accept-reject Metropolis-Hastings step of
+        Chan (2020). The replication driver MFVAR.m passes True on every
+        iteration, and MBFVAR did so up to 0.9.6.
     tol : float, optional
         Convergence tolerance for the Newton iteration.
 
@@ -267,7 +274,7 @@ def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
     return h, is_accept
 
 
-def _sample_CSV_dense(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
+def _sample_CSV_dense(s2, rho, sigh2, h, n, is_forced_accept=False, tol=1e-3):
     """Sample the common stochastic-volatility log-variance path ``h``.
 
     Faithful port of ``sample_CSV.m`` -- an accept/reject Metropolis-Hastings
@@ -287,8 +294,10 @@ def _sample_CSV_dense(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
     n : int
         Cross-sectional dimension (number of variables in the block).
     is_forced_accept : bool, optional
-        If True the proposal is always accepted (mirrors the ``is_ForcedAccept``
-        argument used by the reference driver).
+        If True the proposal is always accepted, skipping the MH correction.
+        Default False, the exact accept-reject Metropolis-Hastings step of
+        Chan (2020). The replication driver MFVAR.m passes True on every
+        iteration, and MBFVAR did so up to 0.9.6.
     tol : float, optional
         Convergence tolerance for the Newton iteration.
 
