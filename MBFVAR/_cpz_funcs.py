@@ -35,10 +35,20 @@ from scipy.sparse.linalg import spsolve
 from scipy.linalg import cholesky, cholesky_banded, solve_triangular
 from scipy.linalg.lapack import dtbtrs
 
-# The CPZ fit runs the exact accept-reject Metropolis-Hastings volatility step
-# (forced acceptance only on the forward pass's first sweep) since MBFVAR
-# 0.9.7; entry points check for this flag.
-CSV_EXACT = True
+# How the CPZ fit runs the common-volatility step. False (the default since
+# SBFVAR 0.2.8 / MBFVAR 0.9.8): acceptance of the accept/reject draw is forced on
+# every iteration, as in the replication driver MFVAR.m of Chan, Poon and Zhu
+# (2023). The draw is then the accept/reject draw from the Gaussian
+# approximation at the conditional mode, without the MH correction of the
+# accept-reject Metropolis-Hastings algorithm of Chan (2020, Online Appendix
+# A), so it follows that approximation truncated at its envelope, not the exact
+# conditional posterior. True: the exact step (forced only on the first
+# iteration, where h starts at zero), which SBFVAR 0.2.7 / MBFVAR 0.9.7 made
+# the default. On the weekly system (T ~ 2,700) its MH step rejects almost
+# every proposal (0 of 299 at the 2012-06-29 and 2021-06-25 origins after the
+# forced first draw), so the volatility path never leaves its first draw; the
+# exact step is kept for study, the forced one is the paper's.
+CSV_EXACT = False
 
 
 # Large precision weight used to enforce the intertemporal-aggregation

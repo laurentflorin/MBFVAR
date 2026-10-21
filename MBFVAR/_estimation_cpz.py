@@ -58,6 +58,7 @@ from tqdm import tqdm
 
 from .mfbvar_funcs import is_explosive
 from ._estimation import _store_block_end
+from . import _cpz_funcs
 from ._cpz_funcs import (
     get_resid_var,
     construct_minnesota,
@@ -169,11 +170,10 @@ def _draw_cpz_block(b, lf_obs, hyp_b, theta_defaults, temp_agg,
                     check_explosive, max_it_stable, stats=None, force_csv=False):
     """Draw one CPZ bi-frequency block without mutating persistent state.
 
-    The volatility path is drawn by the exact accept-reject
-    Metropolis-Hastings step (Chan 2020, Online Appendix A); ``force_csv``
-    forces its acceptance, which the forward pass does only on the first
-    sweep, where h starts at zero. Up to MBFVAR 0.9.6 the forward pass forced
-    it on every sweep, as the replication driver MFVAR.m does."""
+    ``force_csv`` forces acceptance in the volatility step. The forward pass
+    and the systematic-scan proposal force it on every sweep, as the
+    replication driver MFVAR.m does, unless ``_cpz_funcs.CSV_EXACT`` asks
+    for the exact step (forced only on the first sweep); see there."""
     n, p, r, Nm, Nq = b["nv"], b["p"], b["r"], b["Nm"], b["Nq"]
     Tstar, nQ = b["Tstar"], b["nQ"]
     Y_con = _constraint_targets(lf_obs, b["con_index"])
@@ -648,7 +648,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
             draw = _draw_cpz_block(
                 b, lf_obs, self.hyp[bi], theta_defaults, temp_agg,
                 check_explosive, max_it_stable, stats=stab_forward,
-                force_csv=(j == 0))
+                force_csv=(j == 0 or not _cpz_funcs.CSV_EXACT))
             _apply_cpz_block_draw(b, draw)
             csv_accepts[bi] += draw["csv_accept"]
 
@@ -713,7 +713,7 @@ def fit_cpz(self, mbfvar_data, hyp, var_of_interest=None, temp_agg="mean",
                     proposal = _draw_cpz_block(
                         blocks[_m], upstream_lf_obs, self.hyp[_m], theta_defaults,
                         temp_agg, check_explosive, max_it_stable,
-                        stats=stab_backward)
+                        stats=stab_backward, force_csv=not _cpz_funcs.CSV_EXACT)
                 proposed_out = _cpz_block_output(
                     proposal["Y_new"], blocks[_m], var_of_interest,
                     idx_voi_m, idx_voi_q)
