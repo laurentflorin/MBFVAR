@@ -32,7 +32,8 @@ turn.  See :mod:`MBFVAR._estimation_cpz` for the driver.
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import spsolve
-from scipy.linalg import cholesky, solve_triangular
+from scipy.linalg import cholesky, cholesky_banded, solve_triangular
+from scipy.linalg.lapack import dtbtrs
 
 
 # Large precision weight used to enforce the intertemporal-aggregation
@@ -155,6 +156,118 @@ def construct_minnesota(AR_s2, n, lag, theta=(0.2 ** 2, 0.5 ** 2, 100.0, 2.0),
 
 
 def sample_CSV(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
+    """Sample the common stochastic-volatility log-variance path ``h``.
+
+    Faithful port of ``sample_CSV.m`` -- an accept/reject Metropolis-Hastings
+    step built around a Gaussian approximation obtained by Newton iteration.
+
+    Parameters
+    ----------
+    s2 : numpy.ndarray
+        Per-period sum of squared standardised residuals, shape ``(T,)`` where
+        ``T`` is the effective sample (``Tnew`` in the reference).
+    rho : float
+        AR(1) persistence of the log-volatility.
+    sigh2 : float
+        Innovation variance of the log-volatility.
+    h : numpy.ndarray
+        Current log-volatility path, shape ``(T,)``.
+    n : int
+        Cross-sectional dimension (number of variables in the block).
+    is_forced_accept : bool, optional
+        If True the proposal is always accepted (mirrors the ``is_ForcedAccept``
+        argument used by the reference driver).
+    tol : float, optional
+        Convergence tolerance for the Newton iteration.
+
+    Returns
+    -------
+    h : numpy.ndarray
+        Updated log-volatility path.
+    is_accept : int
+        1 if the MH proposal was accepted, 0 otherwise.
+    """
+    s2 = np.asarray(s2, dtype=float).ravel()
+    h = np.asarray(h, dtype=float).ravel().copy()
+    T = s2.shape[0]
+    is_accept = 0
+
+    # Hrho = I - rho * subdiagonal
+    Hrho = sp.eye(T, format="csc") - rho * sp.diags(
+        np.ones(T - 1), -1, shape=(T, T), format="csc"
+    )
+    dvec = np.concatenate(([(1 - rho ** 2) / sigh2], np.ones(T - 1) / sigh2))
+    HiSH = Hrho.T @ sp.diags(dvec) @ Hrho
+    HiSH = HiSH.tocsc()
+
+    # Newton iteration to find the mode ht of the conditional posterior
+    errh = 1.0
+    ht = h.copy()
+    while errh > tol:
+        eht = np.exp(ht)
+        sieht = s2 / eht
+        fh = -n / 2.0 + 0.5 * sieht
+        Gh = 0.5 * sieht
+        Kh = (HiSH + sp.diags(Gh)).tocsc()
+        newht = spsolve(Kh, fh + Gh * ht)
+        errh = np.max(np.abs(newht - ht))
+        ht = newht
+
+    # Every matrix here is tridiagonal. Up to MBFVAR 0.9.5 the factor, the
+    # solve and the Kh quadratic forms used dense T x T copies (O(T^3) per
+    # draw, O(T^2) per accept/reject try, and on the weekly block the tries
+    # run into the hundreds per draw); since 0.9.6 they are banded, O(T). The
+    # random numbers and their order are unchanged (_sample_CSV_dense keeps
+    # the old implementation as the test reference).
+    kd = Kh.diagonal(0)
+    ke = Kh.diagonal(1)
+    ab = np.zeros((2, T))
+    ab[0, 1:] = ke
+    ab[1, :] = kd
+    # Upper factor U (Kh = U'U) is the transpose of the old lower factor, so
+    # U x = z is the old CKh' x = z.
+    U = cholesky_banded(ab, lower=False)
+
+    def _kquad(x):
+        return kd @ (x * x) + 2.0 * (ke @ (x[:-1] * x[1:]))
+
+    hstar = ht
+    logc = (-0.5 * hstar @ (HiSH @ hstar) - n / 2.0 * np.sum(hstar)
+            - 0.5 * np.exp(-hstar) @ s2 + np.log(3.0))
+
+    # Accept/reject draw of the candidate
+    flag = 0
+    hc = ht.copy()
+    while flag == 0:
+        x, info = dtbtrs(U, np.random.standard_normal(T), uplo="U")
+        if info != 0:
+            raise np.linalg.LinAlgError(f"sample_CSV: banded solve failed (info={info})")
+        hc = ht + x
+        alpARc = (-0.5 * hc @ (HiSH @ hc) - n / 2.0 * np.sum(hc)
+                  - 0.5 * np.exp(-hc) @ s2
+                  + 0.5 * _kquad(hc - ht) - logc)
+        if alpARc > np.log(np.random.rand()):
+            flag = 1
+
+    alpAR = (-0.5 * h @ (HiSH @ h) - n / 2.0 * np.sum(h)
+             - 0.5 * np.exp(-h) @ s2
+             + 0.5 * _kquad(h - ht) - logc)
+
+    if alpAR < 0:
+        alpMH = 1.0
+    elif alpARc < 0:
+        alpMH = -alpAR
+    else:
+        alpMH = alpARc - alpAR
+
+    if alpMH > np.log(np.random.rand()) or is_forced_accept:
+        h = hc
+        is_accept = 1
+
+    return h, is_accept
+
+
+def _sample_CSV_dense(s2, rho, sigh2, h, n, is_forced_accept=True, tol=1e-3):
     """Sample the common stochastic-volatility log-variance path ``h``.
 
     Faithful port of ``sample_CSV.m`` -- an accept/reject Metropolis-Hastings
